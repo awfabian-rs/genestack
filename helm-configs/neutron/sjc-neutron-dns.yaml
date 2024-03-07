@@ -1,0 +1,8 @@
+conf:
+  neutron:
+    ovn:
+      dns_servers: "216.109.154.188,216.109.154.189"
+  plugins:
+    ml2_conf:
+      ovn:
+        dns_servers: "216.109.154.188,216.109.154.189"
