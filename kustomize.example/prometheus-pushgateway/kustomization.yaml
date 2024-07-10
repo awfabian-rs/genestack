@@ -5,5 +5,3 @@ helmCharts:
     namespace: prometheus
     includeCRDs: true
     valuesFile: values.yaml
-    additionalValuesFiles:
-      - probe_targets.yaml
