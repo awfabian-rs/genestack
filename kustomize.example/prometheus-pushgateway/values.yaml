@@ -1,73 +1,90 @@
-global:
-  ## Global image registry to use if it needs to be overriden for some specific use cases (e.g local registries, custom images, ...)
-  ##
-  imageRegistry: ""
+# Default values for prometheus-pushgateway.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
 
-restartPolicy: Always
+# Provide a name in place of prometheus-pushgateway for `app:` labels
+nameOverride: ""
 
-kind: Deployment
+# Provide a name to substitute for the full names of resources
+fullnameOverride: ""
 
-## Override the namespace
-##
+# Provide a namespace to substitude for the namespace on resources
 namespaceOverride: ""
 
-# Override Kubernetes version if your distribution does not follow semver v2
-kubeVersionOverride: ""
+image:
+  repository: quay.io/prometheus/pushgateway
+  # if not set appVersion field from Chart.yaml is used
+  tag: ""
+  pullPolicy: IfNotPresent
 
-## set to true to add the release label so scraping of the servicemonitor with kube-prometheus-stack works out of the box
-releaseLabel: false
+# Optional pod imagePullSecrets
+imagePullSecrets: []
 
-podDisruptionBudget: {}
-# maxUnavailable: 0
+service:
+  type: ClusterIP
+  port: 9091
+  targetPort: 9091
+  # nodePort: 32100
+  portName: http
 
-## Allow automount the serviceaccount token for sidecar container (eg: oauthproxy)
-automountServiceAccountToken: false
+  # Optional - Can be used for headless if value is "None"
+  clusterIP: ""
 
-## Additional blackbox-exporter container environment variables
-## For instance to add a http_proxy
+  ipDualStack:
+    enabled: false
+    ipFamilies: ["IPv6", "IPv4"]
+    ipFamilyPolicy: "PreferDualStack"
+
+  loadBalancerIP: ""
+  loadBalancerSourceRanges: []
+
+# Whether to automatically mount a service account token into the pod
+automountServiceAccountToken: true
+
+# Optional pod annotations
+podAnnotations: {}
+
+# Optional pod labels
+podLabels: {}
+
+# Optional service annotations
+serviceAnnotations: {}
+
+# Optional service labels
+serviceLabels: {}
+
+# Optional serviceAccount labels
+serviceAccountLabels: {}
+
+# Optional persistentVolume labels
+persistentVolumeLabels: {}
+
+# Optional additional environment variables
+extraVars: []
+
+## Additional pushgateway container arguments
 ##
-## extraEnv:
-##   HTTP_PROXY: "http://superproxy.com:3128"
-##   NO_PROXY: "localhost,127.0.0.1"
-extraEnv: {}
-
-## Additional blackbox-exporter container environment variables for secret
-## extraEnvFromSecret:
-##   - secretOne
-##   - secretTwo
-extraEnvFromSecret: ""
-
-extraVolumes: []
-  # - name: secret-blackbox-oauth-htpasswd
-  #   secret:
-  #     defaultMode: 420
-  #     secretName: blackbox-oauth-htpasswd
-  # - name: storage-volume
-  #   persistentVolumeClaim:
-#     claimName: example
-
-## Additional volumes that will be attached to the blackbox-exporter container
-extraVolumeMounts:
-# - name: ca-certs
-#   mountPath: /etc/ssl/certs/ca-certificates.crt
+## example:
+## extraArgs:
+##  - --persistence.file=/data/pushgateway.data
+##  - --persistence.interval=5m
+extraArgs: []
 
 ## Additional InitContainers to initialize the pod
-## This supports either a structured array or a templatable string
+##
 extraInitContainers: []
 
-## This supports either a structured array or a templatable string
-
-# Array mode
+# Optional additional containers (sidecar)
 extraContainers: []
   # - name: oAuth2-proxy
   #   args:
-  #     - -https-address=:9116
-  #     - -upstream=http://localhost:9115
+  #     - -https-address=:9092
+  #     - -upstream=http://localhost:9091
   #     - -skip-auth-regex=^/metrics
   #     - -openshift-delegate-urls={"/":{"group":"monitoring.coreos.com","resource":"prometheuses","verb":"get"}}
   #   image: openshift/oauth-proxy:v1.1.0
   #   ports:
-  #       - containerPort: 9116
+  #       - containerPort: 9092
   #         name: proxy
   #   resources:
   #       limits:
@@ -76,149 +93,44 @@ extraContainers: []
   #         memory: 4Mi
   #         cpu: 20m
   #   volumeMounts:
-  #     - mountPath: /etc/prometheus/secrets/blackbox-tls
-#       name: secret-blackbox-tls
-
-# String mode
-# extraContainers: |-
-#   - name: oAuth2-proxy
-#     args:
-#       - -https-address=:9116
-#       - -upstream=http://localhost:9115
-#       - -skip-auth-regex=^/metrics
-#       - -openshift-delegate-urls={"/":{"group":"monitoring.coreos.com","resource":"prometheuses","verb":"get"}}
-#     image: {{ .Values.global.imageRegistry }}/openshift/oauth-proxy:v1.1.0
-
-## Enable pod security policy
-pspEnabled: true
-
-hostNetwork: false
-
-strategy:
-  rollingUpdate:
-    maxSurge: 1
-    maxUnavailable: 0
-  type: RollingUpdate
-
-image:
-  registry: quay.io
-  repository: prometheus/blackbox-exporter
-  # Overrides the image tag whose default is {{ printf "v%s" .Chart.AppVersion }}
-  tag: ""
-  pullPolicy: IfNotPresent
-  digest: ""
-
-  ## Optionally specify an array of imagePullSecrets.
-  ## Secrets must be manually created in the namespace.
-  ## ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
-  ##
-  # pullSecrets:
-  #   - myRegistrKeySecretName
-
-podSecurityContext: {}
-# fsGroup: 1000
-
-## User and Group to run blackbox-exporter container as
-securityContext:
-  runAsUser: 1000
-  runAsGroup: 1000
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop: ["ALL"]
-# Add NET_RAW to enable ICMP
-#    add: ["NET_RAW"]
-
-livenessProbe:
-  httpGet:
-    path: /-/healthy
-    port: http
-  failureThreshold: 3
-
-readinessProbe:
-  httpGet:
-    path: /-/healthy
-    port: http
-
-nodeSelector:
-  openstack-control-plane: enabled
-
-tolerations: []
-affinity: {}
-
-## Topology spread constraints rely on node labels to identify the topology domain(s) that each Node is in.
-## Ref: https://kubernetes.io/docs/concepts/workloads/pods/pod-topology-spread-constraints/
-topologySpreadConstraints: []
-  # - maxSkew: 1
-  #   topologyKey: failure-domain.beta.kubernetes.io/zone
-  #   whenUnsatisfiable: DoNotSchedule
-  #   labelSelector:
-#     matchLabels:
-#       app.kubernetes.io/instance: jiralert
-
-# if the configuration is managed as secret outside the chart, using SealedSecret for example,
-# provide the name of the secret here. If secretConfig is set to true, configExistingSecretName will be ignored
-# in favor of the config value.
-configExistingSecretName: ""
-# Store the configuration as a `Secret` instead of a `ConfigMap`, useful in case it contains sensitive data
-secretConfig: false
-config:
-  modules:
-    http_2xx:
-      prober: http
-      timeout: 5s
-      http:
-        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
-        follow_redirects: true
-        preferred_ip_protocol: "ip4"
-        valid_status_codes: [200, 202, 204, 300]
-
-# Set custom config path, other than default /config/blackbox.yaml. If let empty, path will be "/config/blackbox.yaml"
-# configPath: "/foo/bar"
-
-extraConfigmapMounts: []
-  # - name: certs-configmap
-  #   mountPath: /etc/secrets/ssl/
-  #   subPath: certificates.crt # (optional)
-  #   configMap: certs-configmap
-  #   readOnly: true
-#   defaultMode: 420
-
-## Additional secret mounts
-# Defines additional mounts with secrets. Secrets must be manually created in the namespace.
-extraSecretMounts: []
-  # - name: secret-files
-  #   mountPath: /etc/secrets
-  #   secretName: blackbox-secret-files
-  #   readOnly: true
-#   defaultMode: 420
+  #     - mountPath: /etc/prometheus/secrets/pushgateway-tls
+  #       name: secret-pushgateway-tls
 
 resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
   # limits:
-  #   memory: 300Mi
+  #   cpu: 200m
+  #   memory: 50Mi
   # requests:
-#   memory: 50Mi
+  #   cpu: 100m
+  #   memory: 30Mi
 
-priorityClassName: ""
+# -- Sets web configuration
+# To enable basic authentication, provide basicAuthUsers as a map
+webConfiguration: {}
+  # basicAuthUsers:
+  #   username: password
 
-service:
-  annotations: {}
-  labels: {}
-  type: ClusterIP
-  port: 9115
-  ipDualStack:
-    enabled: false
-    ipFamilies: ["IPv6", "IPv4"]
-    ipFamilyPolicy: "PreferDualStack"
+liveness:
+  enabled: true
+  probe:
+    httpGet:
+      path: /-/healthy
+      port: 9091
+    initialDelaySeconds: 10
+    timeoutSeconds: 10
 
-# Only changes container port. Application port can be changed with extraArgs (--web.listen-address=:9115)
-# https://github.com/prometheus/blackbox_exporter/blob/998037b5b40c1de5fee348ffdea8820509d85171/main.go#L55
-containerPort: 9115
-
-# Number of port to expose on the host. If specified, this must be a valid port number, 0 < x < 65536. If zero, no port is exposed.
-# This is useful for communicating with Daemon Pods when kind is DaemonSet.
-hostPort: 0
+readiness:
+  enabled: true
+  probe:
+    httpGet:
+      path: /-/ready
+      port: 9091
+    initialDelaySeconds: 10
+    timeoutSeconds: 10
 
 serviceAccount:
   # Specifies whether a ServiceAccount should be created
@@ -226,259 +138,234 @@ serviceAccount:
   # The name of the ServiceAccount to use.
   # If not set and create is true, a name is generated using the fullname template
   name:
-  annotations: {}
 
-## An Ingress resource can provide name-based virtual hosting and TLS
-## termination among other things for CouchDB deployments which are accessed
-## from outside the Kubernetes cluster.
-## ref: https://kubernetes.io/docs/concepts/services-networking/ingress/
+## Configure ingress resource that allow you to access the
+## pushgateway installation. Set up the URL
+## ref: http://kubernetes.io/docs/user-guide/ingress/
+##
 ingress:
+  ## Enable Ingress.
+  ##
   enabled: false
+  # AWS ALB requires path of /*
   className: ""
-  labels: {}
-  annotations: {}
-    # kubernetes.io/ingress.class: nginx
-  # kubernetes.io/tls-acme: "true"
-  hosts:
-    ## The host property on hosts and tls is passed through helm tpl function.
-    ## ref: https://helm.sh/docs/developing_charts/#using-the-tpl-function
-    - host: chart-example.local
-      paths:
-        - path: /
-          pathType: ImplementationSpecific
-  tls: []
-  #  - secretName: chart-example-tls
-  #    hosts:
-  #      - chart-example.local
+  path: /
+  pathType: ImplementationSpecific
 
-podAnnotations: {}
+  ## Extra paths to prepend to every host configuration. This is useful when working with annotation based services.
+  extraPaths: []
+  # - path: /*
+  #   backend:
+  #     serviceName: ssl-redirect
+  #     servicePort: use-annotation
 
-# Annotations for the Deployment
-deploymentAnnotations: {}
+  ## Annotations.
+  ##
+  # annotations:
+  #   kubernetes.io/ingress.class: nginx
+  #   kubernetes.io/tls-acme: 'true'
 
-# Annotations for the Secret
-secretAnnotations: {}
+  ## Hostnames.
+  ## Must be provided if Ingress is enabled.
+  ##
+  # hosts:
+  #   - pushgateway.domain.com
 
-# Hostaliases allow to add additional DNS entries to be injected directly into pods.
-# This will take precedence over your implemented DNS solution
+  ## TLS configuration.
+  ## Secrets must be manually created in the namespace.
+  ##
+  # tls:
+  #   - secretName: pushgateway-tls
+  #     hosts:
+  #       - pushgateway.domain.com
+
+tolerations: []
+  # - effect: NoSchedule
+  #   operator: Exists
+
+## Node labels for pushgateway pod assignment
+## Ref: https://kubernetes.io/docs/user-guide/node-selection/
+##
+nodeSelector: {}
+
+replicaCount: 1
+
 hostAliases: []
-#  - ip: 192.168.1.1
-#    hostNames:
-#      - test.example.com
-#      - another.example.net
+  # - ip: "127.0.0.1"
+  #   hostnames:
+  #   - "foo.local"
+  #   - "bar.local"
+  # - ip: "10.1.2.3"
+  #   hostnames:
+  #   - "foo.remote"
+  #   - "bar.remote"
 
-pod:
-  labels: {}
+## When running more than one replica alongside with persistence, different volumes are needed
+## per replica, since sharing a `persistence.file` across replicas does not keep metrics synced.
+## For this purpose, you can enable the `runAsStatefulSet` to deploy the pushgateway as a
+## StatefulSet instead of as a Deployment.
+runAsStatefulSet: false
 
-extraArgs: []
-# - --history.limit=1000
+## Security context to be added to push-gateway pods
+##
+securityContext:
+  fsGroup: 65534
+  runAsUser: 65534
+  runAsNonRoot: true
 
-replicas: 1
+## Security context to be added to push-gateway containers
+## Having a separate variable as securityContext differs for pods and containers.
+containerSecurityContext: {}
+#  allowPrivilegeEscalation: false
+#  readOnlyRootFilesystem: true
+#  runAsUser: 65534
+#  runAsNonRoot: true
 
+## Affinity for pod assignment
+## Ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity
+affinity: {}
+
+## Pod anti-affinity can prevent the scheduler from placing pushgateway replicas on the same node.
+## The value "soft" means that the scheduler should *prefer* to not schedule two replica pods onto the same node but no guarantee is provided.
+## The value "hard" means that the scheduler is *required* to not schedule two replica pods onto the same node.
+## The default value "" will disable pod anti-affinity so that no anti-affinity rules will be configured (unless set in `affinity`).
+##
+podAntiAffinity: ""
+
+## If anti-affinity is enabled sets the topologyKey to use for anti-affinity.
+## This can be changed to, for example, failure-domain.beta.kubernetes.io/zone
+##
+podAntiAffinityTopologyKey: kubernetes.io/hostname
+
+## Topology spread constraints for pods
+## Ref: https://kubernetes.io/docs/concepts/workloads/pods/pod-topology-spread-constraints/
+topologySpreadConstraints: []
+
+# Enable this if you're using https://github.com/coreos/prometheus-operator
 serviceMonitor:
-  ## If true, a ServiceMonitor CRD is created for a prometheus operator
-  ## https://github.com/coreos/prometheus-operator for blackbox-exporter itself
-  ##
-  selfMonitor:
-    enabled: false
-    additionalMetricsRelabels: {}
-    additionalRelabeling: []
-    labels: {}
-    path: /metrics
-    scheme: http
-    tlsConfig: {}
-    interval: 30s
-    scrapeTimeout: 30s
-    ## Port can be defined by assigning a value for the port key below
-    ## port:
+  enabled: false
+  namespace: monitoring
 
-  ## If true, a ServiceMonitor CRD is created for a prometheus operator
-  ## https://github.com/coreos/prometheus-operator for each target
-  ##
-  enabled: true
+  # telemetryPath: HTTP resource path from which to fetch metrics.
+  # Telemetry path, default /metrics, has to be prefixed accordingly if pushgateway sets a route prefix at start-up.
+  #
+  telemetryPath: "/metrics"
 
-  # Default values that will be used for all ServiceMonitors created by `targets`
-  defaults:
-    additionalMetricsRelabels: {}
-    additionalRelabeling: []
-    labels: {}
-    interval: 30s
-    scrapeTimeout: 30s
-    module: http_2xx
+  # Fallback to the prometheus default unless specified
+  # interval: 10s
+
   ## scheme: HTTP scheme to use for scraping. Can be used with `tlsConfig` for example if using istio mTLS.
-  scheme: http
-  ## path: HTTP path. Needs to be adjusted, if web.route-prefix is set
-  path: "/probe"
+  # scheme: ""
+
   ## tlsConfig: TLS configuration to use when scraping the endpoint. For example if using istio mTLS.
   ## Of type: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#tlsconfig
-  tlsConfig: {}
-  bearerTokenFile:
+  # tlsConfig: {}
 
-  targets:
-#    - name: example                    # Human readable URL that will appear in Prometheus / AlertManager
-#      url: http://example.com/healthz  # The URL that blackbox will scrape
-#      hostname: example.com            # HTTP probes can accept an additional `hostname` parameter that will set `Host` header and TLS SNI
-#      labels: {}                       # Map of labels for ServiceMonitor. Overrides value set in `defaults`
-#      interval: 60s                    # Scraping interval. Overrides value set in `defaults`
-#      scrapeTimeout: 60s               # Scrape timeout. Overrides value set in `defaults`
-#      module: http_2xx                 # Module used for scraping. Overrides value set in `defaults`
-#      additionalMetricsRelabels: {}    # Map of metric labels and values to add
-#      additionalRelabeling: []         # List of metric relabeling actions to run
+  # bearerTokenFile:
+  # Fallback to the prometheus default unless specified
+  # scrapeTimeout: 30s
 
-## Custom PrometheusRules to be defined
-## ref: https://github.com/coreos/prometheus-operator#customresourcedefinitions
-prometheusRule:
-  enabled: false
+  ## Used to pass Labels that are used by the Prometheus installed in your cluster to select Service Monitors to work with
+  ## ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#prometheusspec
   additionalLabels: {}
-  namespace: ""
-  rules: []
 
-podMonitoring:
-  ## If true, a PodMonitoring CR is created for google managed prometheus
-  ## https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring for blackbox-exporter itself
-  ##
-  selfMonitor:
-    enabled: false
-    additionalMetricsRelabels: {}
-    labels: {}
-    path: /metrics
-    interval: 30s
-    scrapeTimeout: 30s
+  # Retain the job and instance labels of the metrics pushed to the Pushgateway
+  # [Scraping Pushgateway](https://github.com/prometheus/pushgateway#configure-the-pushgateway-as-a-target-to-scrape)
+  honorLabels: true
 
-  ## If true, a PodMonitoring CR is created for a google managed prometheus
-  ## https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring for each target
+  ## Metric relabel configs to apply to samples before ingestion.
+  ## [Metric Relabeling](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)
+  metricRelabelings: []
+  # - action: keep
+  #   regex: 'kube_(daemonset|deployment|pod|namespace|node|statefulset).+'
+  #   sourceLabels: [__name__]
+
+  ## Relabel configs to apply to samples before ingestion.
+  ## [Relabeling](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config)
+  relabelings: []
+  # - sourceLabels: [__meta_kubernetes_pod_node_name]
+  #   separator: ;
+  #   regex: ^(.*)$
+  #   targetLabel: nodename
+  #   replacement: $1
+  #   action: replace
+
+# The values to set in the PodDisruptionBudget spec (minAvailable/maxUnavailable)
+# If not set then a PodDisruptionBudget will not be created
+podDisruptionBudget: {}
+
+priorityClassName:
+
+# Deployment Strategy type
+strategy:
+  type: Recreate
+
+persistentVolume:
+  ## If true, pushgateway will create/use a Persistent Volume Claim
+  ## If false, use emptyDir
   ##
   enabled: false
 
-  ## Default values that will be used for all PodMonitoring created by `targets`
-  ## Following PodMonitoring API specs https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#scrapeendpoint
-  defaults:
-    additionalMetricsRelabels: {}
-    labels: {}
-    interval: 30s
-    scrapeTimeout: 30s
-    module: http_2xx
-  ## scheme: Protocol scheme to use to scrape.
-  scheme: http
-  ## path: HTTP path. Needs to be adjusted, if web.route-prefix is set
-  path: "/probe"
-  ## tlsConfig: TLS configuration to use when scraping the endpoint. For example if using istio mTLS.
-  ## Of type: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#tlsconfig
-  tlsConfig: {}
+  ## pushgateway data Persistent Volume access modes
+  ## Must match those of existing PV or dynamic provisioner
+  ## Ref: http://kubernetes.io/docs/user-guide/persistent-volumes/
+  ##
+  accessModes:
+    - ReadWriteOnce
 
-  targets:
-#    - name: example                    # Human readable URL that will appear in Google Managed Prometheus / AlertManager
-#      url: http://example.com/healthz  # The URL that blackbox will scrape
-#      hostname: example.com            # HTTP probes can accept an additional `hostname` parameter that will set `Host` header and TLS SNI
-#      labels: {}                       # Map of labels for PodMonitoring. Overrides value set in `defaults`
-#      interval: 60s                    # Scraping interval. Overrides value set in `defaults`
-#      scrapeTimeout: 60s               # Scrape timeout. Overrides value set in `defaults`
-#      module: http_2xx                 # Module used for scraping. Overrides value set in `defaults`
-#      additionalMetricsRelabels: {}    # Map of metric labels and values to add
+  ## pushgateway data Persistent Volume Claim annotations
+  ##
+  annotations: {}
 
-## Network policy for chart
-networkPolicy:
-  # Enable network policy and allow access from anywhere
-  enabled: false
-  # Limit access only from monitoring namespace
-  # Before setting this value to true, you must add the name=monitoring label to the monitoring namespace
-  # Network Policy uses label filtering
-  allowMonitoringNamespace: false
+  ## pushgateway data Persistent Volume existing claim name
+  ## Requires pushgateway.persistentVolume.enabled: true
+  ## If defined, PVC must be created manually before volume will be bound
+  existingClaim: ""
 
-## dnsPolicy and dnsConfig for Deployments and Daemonsets if you want non-default settings.
-## These will be passed directly to the PodSpec of same.
-dnsPolicy:
-dnsConfig:
+  ## pushgateway data Persistent Volume mount root path
+  ##
+  mountPath: /data
 
-# Extra manifests to deploy as an array
+  ## pushgateway data Persistent Volume size
+  ##
+  size: 2Gi
+
+  ## pushgateway data Persistent Volume Storage Class
+  ## If defined, storageClassName: <storageClass>
+  ## If set to "-", storageClassName: "", which disables dynamic provisioning
+  ## If undefined (the default) or set to null, no storageClassName spec is
+  ##   set, choosing the default provisioner.  (gp2 on AWS, standard on
+  ##   GKE, AWS & OpenStack)
+  ##
+  # storageClass: "-"
+
+  ## Subdirectory of pushgateway data Persistent Volume to mount
+  ## Useful if the volume's root directory is not empty
+  ##
+  subPath: ""
+
+extraVolumes: []
+  # - name: extra
+  #   emptyDir: {}
+extraVolumeMounts: []
+  # - name: extra
+  #   mountPath: /usr/share/extras
+  #   readOnly: true
+
+# Configuration for clusters with restrictive network policies in place:
+# - allowAll allows access to the PushGateway from any namespace
+# - customSelector is a list of pod/namespaceSelectors to allow access from
+# These options are mutually exclusive and the latter will take precedence.
+networkPolicy: {}
+  # allowAll: true
+  # customSelectors:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         type: admin
+  #   - podSelector:
+  #       matchLabels:
+  #         app: myapp
+
+# Array of extra K8s objects to deploy (evaluated as a template)
+# The value can hold an array of strings as well as objects
 extraManifests: []
-  # - apiVersion: v1
-  #   kind: ConfigMap
-  #   metadata:
-  #   labels:
-  #     name: prometheus-extra
-  #   data:
-#     extra-data: "value"
-
-# global common labels, applied to all ressources
-commonLabels: {}
-
-# Enable vertical pod autoscaler support for prometheus-blackbox-exporter
-verticalPodAutoscaler:
-  enabled: false
-
-  # Recommender responsible for generating recommendation for the object.
-  # List should be empty (then the default recommender will generate the recommendation)
-  # or contain exactly one recommender.
-  # recommenders:
-  # - name: custom-recommender-performance
-
-  # List of resources that the vertical pod autoscaler can control. Defaults to cpu and memory
-  controlledResources: []
-  # Specifies which resource values should be controlled: RequestsOnly or RequestsAndLimits.
-  # controlledValues: RequestsAndLimits
-
-  # Define the max allowed resources for the pod
-  maxAllowed: {}
-  # cpu: 200m
-  # memory: 100Mi
-  # Define the min allowed resources for the pod
-  minAllowed: {}
-  # cpu: 200m
-  # memory: 100Mi
-
-  updatePolicy:
-    # Specifies minimal number of replicas which need to be alive for VPA Updater to attempt pod eviction
-    # minReplicas: 1
-    # Specifies whether recommended updates are applied when a Pod is started and whether recommended updates
-    # are applied during the life of a Pod. Possible values are "Off", "Initial", "Recreate", and "Auto".
-    updateMode: Auto
-
-configReloader:
-  enabled: false
-  containerPort: 8080
-  config:
-    logFormat: logfmt
-    logLevel: info
-    watchInterval: 1m
-  image:
-    registry: quay.io
-    repository: prometheus-operator/prometheus-config-reloader
-    tag: "v0.71.2"
-    pullPolicy: IfNotPresent
-    digest: ""
-  securityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    readOnlyRootFilesystem: true
-    runAsNonRoot: true
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
-  resources:
-    limits:
-      memory: 50Mi
-    requests:
-      cpu: 10m
-      memory: 20Mi
-  livenessProbe:
-    httpGet:
-      path: /healthz
-      port: reloader-web
-      scheme: HTTP
-  readinessProbe:
-    httpGet:
-      path: /healthz
-      port: reloader-web
-      scheme: HTTP
-  service:
-    port: 8080
-  serviceMonitor:
-    selfMonitor:
-      additionalMetricsRelabels: {}
-      additionalRelabeling: []
-      path: /metrics
-      scheme: http
-      tlsConfig: {}
-      interval: 30s
-      scrapeTimeout: 30s
