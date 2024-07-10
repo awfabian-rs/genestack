@@ -186,8 +186,8 @@ tolerations: []
 ## Node labels for pushgateway pod assignment
 ## Ref: https://kubernetes.io/docs/user-guide/node-selection/
 ##
-nodeSelector: {}
-
+nodeSelector:
+  openstack-control-plane: enabled
 replicaCount: 1
 
 hostAliases: []
@@ -243,8 +243,8 @@ topologySpreadConstraints: []
 
 # Enable this if you're using https://github.com/coreos/prometheus-operator
 serviceMonitor:
-  enabled: false
-  namespace: monitoring
+  enabled: true
+  namespace: prometheus
 
   # telemetryPath: HTTP resource path from which to fetch metrics.
   # Telemetry path, default /metrics, has to be prefixed accordingly if pushgateway sets a route prefix at start-up.
