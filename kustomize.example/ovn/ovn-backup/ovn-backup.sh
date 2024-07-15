@@ -44,26 +44,20 @@ log_line() {
 # just read them if you want to.
 
 
-STATS_DIR="{$BACKUP_DIR}/stats"
+STATS_DIR="${BACKUP_DIR}/stats"
 
 [[ -d "$STATS_DIR" ]] || mkdir "$STATS_DIR"
 
 declare -A metric_types=(
-    ["run_count"]="count"
-    ["save_to_disk_success_count"]="count"
-    ["save_to_disk_failure_count"]="count"
-    ["upload_attempt_count"]="count"
-    ["upload_success_count"]="count"
-    ["upload_failure_count"]="count"
+    ["run_count"]="counter"
+    ["save_to_disk_success_count"]="counter"
+    ["save_to_disk_failure_count"]="counter"
+    ["upload_attempt_count"]="counter"
+    ["upload_success_count"]="counter"
+    ["upload_failure_count"]="counter"
     ["disk_files_gauge"]="gauge"
     ["swift_objects_gauge"]="gauge"
 )
-
-
-# TODO delete this
-# metrics=("run_count" "save_to_disk_success_count" "save_to_disk_failure_count"
-# "upload_attempt_count" "upload_success_count" "upload_failure_count"
-# "disk_files_gauge" "swift_objects_gauge")
 
 # Initialize metrics/stats files with 0 if they don't exist
 {
@@ -84,6 +78,17 @@ get_metric() {
     echo "$VALUE"
 }
 
+# update count $1: stat name, $2 new value
+# Used for updating disk file count and Cloud Files object counts.
+update_metric() {
+    local STAT_NAME
+    local VALUE
+    STAT_NAME="$1"
+    VALUE="$2"
+    STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
+    echo "$VALUE" > $STAT_FULL_FILENAME
+}
+
 # increment increments a stats counter $1 by 1
 increment() {
     local VALUE
@@ -96,28 +101,16 @@ increment() {
 
 increment run_count
 
-# update count $1: stat name, $2 new value
-# Used for updating disk file count and Cloud Files object counts.
-update_metric() {
-    local STAT_NAME
-    local COUNT
-    STAT_NAME="$1"
-    COUNT="$2"
-    STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
-    echo "$VALUE" > $STAT_FULL_FILENAME
-}
-
 finalize_and_upload_metrics() {
-    FILE_COUNT=$(find /backup -name \*.backup | wc -l)
+    local FILE_COUNT
+    FILE_COUNT=$(find "$BACKUP_DIR" -name \*.backup | wc -l)
     update_metric disk_files_gauge "$FILE_COUNT"
-    local COUNT
+    local OBJECT_COUNT
     if [[ "$SWIFT_TEMPAUTH_UPLOAD" == "true" ]]
     then
-        COUNT=$($SWIFT stat "$CONTAINER" | awk '/Objects:/ { print $2 }')
-        update_metric swift_objects_gauge "$COUNT"
+        OBJECT_COUNT=$($SWIFT stat "$CONTAINER" | awk '/Objects:/ { print $2 }')
+        update_metric swift_objects_gauge "$OBJECT_COUNT"
     fi
-    COUNT=$(find /backup -name \*.backup | wc -l)
-    update_metric disk_files_gauge $COUNT
 
     if [[ "$PROMETHEUS_UPLOAD" != "true" ]]
     then
