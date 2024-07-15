@@ -43,33 +43,97 @@ log_line() {
 # Stats files init. These mostly get used to send to Prometheus, but you could
 # just read them if you want to.
 
+
 STATS_DIR="{$BACKUP_DIR}/stats"
 
 [[ -d "$STATS_DIR" ]] || mkdir "$STATS_DIR"
 
-metrics=("run_count" "save_to_disk_success_count" "save_to_disk_failure_count"
-"upload_attempt_count" "upload_success_count" "upload_failure_count"
-"disk_files_gauge" "swift_objects_gauge")
+declare -A metric_types=(
+    ["run_count"]="count"
+    ["save_to_disk_success_count"]="count"
+    ["save_to_disk_failure_count"]="count"
+    ["upload_attempt_count"]="count"
+    ["upload_success_count"]="count"
+    ["upload_failure_count"]="count"
+    ["disk_files_gauge"]="gauge"
+    ["swift_objects_gauge"]="gauge"
+)
 
-for metric_filename in "${metrics[@]}"
+
+# TODO delete this
+# metrics=("run_count" "save_to_disk_success_count" "save_to_disk_failure_count"
+# "upload_attempt_count" "upload_success_count" "upload_failure_count"
+# "disk_files_gauge" "swift_objects_gauge")
+
+# Initialize metrics/stats files with 0 if they don't exist
+{
+for metric_filename in "${!metric_types[@]}"
 do
     metric_file_fullname="${STATS_DIR}/$metric_filename"
     [[ -e "$metric_file_fullname" ]] || echo "0" > "$metric_file_fullname"
 done
+}
 
-# end stats file init
-
-# Function to increment a stats counter $1
-increment() {
+# get_metric takes the metric name, reads the metric file, and echos the value
+get_metric() {
     local STAT_NAME
+    local STAT_FULL_FILENAME
     STAT_NAME="$1"
     STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
     VALUE="$(cat $STAT_FULL_FILENAME)"
+    echo "$VALUE"
+}
+
+# increment increments a stats counter $1 by 1
+increment() {
+    local VALUE
+    local METRIC_NAME
+    METRIC_NAME="$1"
+    VALUE="$(get_metric "$METRIC_NAME")"
     ((VALUE++))
-    echo "$VALUE" > $STAT_FULL_FILENAME
+    update_metric "$METRIC_NAME" "$VALUE"
 }
 
 increment run_count
+
+# update count $1: stat name, $2 new value
+# Used for updating disk file count and Cloud Files object counts.
+update_metric() {
+    local STAT_NAME
+    local COUNT
+    STAT_NAME="$1"
+    COUNT="$2"
+    STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
+    echo "$VALUE" > $STAT_FULL_FILENAME
+}
+
+finalize_and_upload_metrics() {
+    FILE_COUNT=$(find /backup -name \*.backup | wc -l)
+    update_metric disk_files_gauge "$FILE_COUNT"
+    local COUNT
+    if [[ "$SWIFT_TEMPAUTH_UPLOAD" == "true" ]]
+    then
+        COUNT=$($SWIFT stat "$CONTAINER" | awk '/Objects:/ { print $2 }')
+        update_metric swift_objects_gauge "$COUNT"
+    fi
+    COUNT=$(find /backup -name \*.backup | wc -l)
+    update_metric disk_files_gauge $COUNT
+
+    if [[ "$PROMETHEUS_UPLOAD" != "true" ]]
+    then
+        exit 0
+    fi
+
+    for metric in "${!metric_types[@]}"
+    do
+        echo "# TYPE $metric ${metric_types[$metric]}
+$metric{label=\"ovn-backup\"} $(get_metric $metric)" | \
+        curl -sS \
+          "$PROMETHEUS_PUSHGATEWAY_URL/metrics/job/$PROMETHEUS_JOB_NAME" \
+          --data-binary @-
+    done
+}
+trap finalize_and_upload_metrics EXIT INT TERM HUP
 
 # Delete old backup files on volume.
 cd "$BACKUP_DIR" || exit 2
@@ -80,8 +144,11 @@ find "$BACKUP_DIR" -ctime +"$RETENTION_DAYS" -delete;
 YMD="$(date +"%Y/%m/%d")"
 # kubectl-ko creates backups in $PWD, so we cd first.
 mkdir -p "$YMD" && cd "$YMD" || exit 2
-FAILED=false
 
+# This treats the saved failed and success count as a single metric for both
+# backups; if either one fails, we increment the failure count, otherwise,
+# the success count.
+FAILED=false
 if ! /kube-ovn/kubectl-ko nb backup
 then
     log_line ERROR "nb backup failed"
@@ -131,9 +198,9 @@ upload_file() {
     OBJECT_NAME="$FILE"
     if $SWIFT upload "$CONTAINER" --object-name "$OBJECT_NAME" - < "$FILE"
     then
-      log_line INFO "SUCCESSFUL UPLOAD $FILE as object $OBJECT_NAME"
+      log_line INFO "SUCCESSFUL UPLOAD $FILE as object $OBJECT_NAME to container $CONTAINER"
     else
-      log_line ERROR "FAILURE API swift exited $? uploading $FILE as $OBJECT_NAME"
+      log_line ERROR "FAILURE API swift exited $? uploading $FILE as $OBJECT_NAME to container $CONTAINER"
       FAILED_UPLOAD=true
     fi
 }
