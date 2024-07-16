@@ -28,7 +28,6 @@ log_level() {
         ;;
     esac
 }
-export -f log_level
 
 log_line() {
     local LEVEL
@@ -40,7 +39,91 @@ log_line() {
         echo "$line" | tee -a "$LOG_FILE"
     fi
 }
-export -f log_line # exported for upload_file
+
+# Stats files init. These mostly get used to send to Prometheus, but you could
+# just read them if you want to.
+
+STATS_DIR="${BACKUP_DIR}/stats"
+
+[[ -d "$STATS_DIR" ]] || mkdir "$STATS_DIR"
+
+declare -A metric_types=(
+    ["run_count"]="counter"
+    ["save_pairs_to_disk_success_count"]="counter"
+    ["save_pairs_to_disk_failure_count"]="counter"
+    ["upload_attempt_count"]="counter"
+    ["upload_pairs_success_count"]="counter"
+    ["upload_pairs_failure_count"]="counter"
+    ["disk_files_gauge"]="gauge"
+    ["swift_objects_gauge"]="gauge"
+)
+
+# Initialize metrics/stats files with 0 if they don't exist
+for metric_filename in "${!metric_types[@]}"
+do
+    metric_file_fullname="${STATS_DIR}/$metric_filename"
+    [[ -e "$metric_file_fullname" ]] || echo "0" > "$metric_file_fullname"
+done
+
+# get_metric takes the metric name, reads the metric file, and echos the value
+get_metric() {
+    local STAT_NAME
+    local STAT_FULL_FILENAME
+    STAT_NAME="$1"
+    STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
+    VALUE="$(cat $STAT_FULL_FILENAME)"
+    echo "$VALUE"
+}
+
+# update count $1: stat name, $2 new value
+# Used for updating disk file count and Cloud Files object counts.
+update_metric() {
+    local STAT_NAME
+    local VALUE
+    STAT_NAME="$1"
+    VALUE="$2"
+    STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
+    echo "$VALUE" > "$STAT_FULL_FILENAME"
+}
+
+# increment increments a stats counter $1 by 1
+increment() {
+    local VALUE
+    local METRIC_NAME
+    METRIC_NAME="$1"
+    VALUE="$(get_metric "$METRIC_NAME")"
+    ((VALUE++))
+    update_metric "$METRIC_NAME" "$VALUE"
+}
+
+increment run_count
+
+finalize_and_upload_metrics() {
+    local FILE_COUNT
+    FILE_COUNT=$(find "$BACKUP_DIR" -name \*.backup | wc -l)
+    update_metric disk_files_gauge "$FILE_COUNT"
+    local OBJECT_COUNT
+    if [[ "$SWIFT_TEMPAUTH_UPLOAD" == "true" ]]
+    then
+        OBJECT_COUNT=$($SWIFT stat "$CONTAINER" | awk '/Objects:/ { print $2 }')
+        update_metric swift_objects_gauge "$OBJECT_COUNT"
+    fi
+
+    if [[ "$PROMETHEUS_UPLOAD" != "true" ]]
+    then
+        exit 0
+    fi
+
+    for metric in "${!metric_types[@]}"
+    do
+        echo "# TYPE $metric ${metric_types[$metric]}
+$metric{label=\"ovn-backup\"} $(get_metric $metric)" | \
+        curl -sS \
+          "$PROMETHEUS_PUSHGATEWAY_URL/metrics/job/$PROMETHEUS_JOB_NAME" \
+          --data-binary @-
+    done
+}
+trap finalize_and_upload_metrics EXIT INT TERM HUP
 
 # Delete old backup files on volume.
 cd "$BACKUP_DIR" || exit 2
@@ -51,8 +134,27 @@ find "$BACKUP_DIR" -ctime +"$RETENTION_DAYS" -delete;
 YMD="$(date +"%Y/%m/%d")"
 # kubectl-ko creates backups in $PWD, so we cd first.
 mkdir -p "$YMD" && cd "$YMD" || exit 2
-/kube-ovn/kubectl-ko nb backup || log_line ERROR "nb backup failed"
-/kube-ovn/kubectl-ko sb backup || log_line ERROR "sb backup failed"
+
+# This treats the saved failed and success count as a single metric for both
+# backups; if either one fails, we increment the failure count, otherwise,
+# the success count.
+FAILED=false
+if ! /kube-ovn/kubectl-ko nb backup
+then
+    log_line ERROR "nb backup failed"
+    FAILED=true
+fi
+if ! /kube-ovn/kubectl-ko sb backup
+then
+    log_line ERROR "sb backup failed"
+    FAILED=true
+fi
+if [[ "$FAILED" == "true" ]]
+then
+    increment save_pairs_to_disk_failure_count
+else
+    increment save_pairs_to_disk_success_count
+fi
 
 if [[ "$SWIFT_TEMPAUTH_UPLOAD" != "true" ]]
 then
@@ -63,11 +165,12 @@ fi
 
 cd "$BACKUP_DIR" || exit 2
 
+increment upload_attempt_count
+
 # Make a working "swift" command
 SWIFT="kubectl -n openstack exec -i openstack-admin-client --
 env -i ST_AUTH=$ST_AUTH ST_USER=$ST_USER ST_KEY=$ST_KEY
 /var/lib/openstack/bin/swift"
-export SWIFT
 
 # Create the container if it doesn't exist
 if ! $SWIFT stat "$CONTAINER" > /dev/null
@@ -84,16 +187,28 @@ upload_file() {
     OBJECT_NAME="$FILE"
     if $SWIFT upload "$CONTAINER" --object-name "$OBJECT_NAME" - < "$FILE"
     then
-      log_line INFO "SUCCESSFUL UPLOAD $FILE as object $OBJECT_NAME"
+      log_line INFO "SUCCESSFUL UPLOAD $FILE as object $OBJECT_NAME to container $CONTAINER"
     else
-      log_line ERROR "FAILURE API swift exited $? uploading $FILE as $OBJECT_NAME"
+      log_line ERROR "FAILURE API swift exited $? uploading $FILE as $OBJECT_NAME to container $CONTAINER"
+      FAILED_UPLOAD=true
     fi
 }
-export -f upload_file
 
 # find created backups and upload them
 cd "$BACKUP_DIR" || exit 2
-# unusual find syntax to use an exported function from the shell
-find "$YMD" -type f -newer "$BACKUP_DIR/last_upload" \
--exec bash -c 'upload_file "$0"' {} \;
+
+FAILED_UPLOAD=false
+find "$YMD" -type f -newer "$BACKUP_DIR/last_upload" | \
+while read file
+do
+    upload_file "$file"
+done
+
+if [[ "$FAILED_UPLOAD" == "true" ]]
+then
+    increment upload_pairs_failure_count
+else
+    increment upload_pairs_success_count
+fi
+
 touch "$BACKUP_DIR/last_upload"
