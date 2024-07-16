@@ -43,30 +43,27 @@ log_line() {
 # Stats files init. These mostly get used to send to Prometheus, but you could
 # just read them if you want to.
 
-
 STATS_DIR="${BACKUP_DIR}/stats"
 
 [[ -d "$STATS_DIR" ]] || mkdir "$STATS_DIR"
 
 declare -A metric_types=(
     ["run_count"]="counter"
-    ["save_to_disk_success_count"]="counter"
-    ["save_to_disk_failure_count"]="counter"
+    ["save_pairs_to_disk_success_count"]="counter"
+    ["save_pairs_to_disk_failure_count"]="counter"
     ["upload_attempt_count"]="counter"
-    ["upload_success_count"]="counter"
-    ["upload_failure_count"]="counter"
+    ["upload_pairs_success_count"]="counter"
+    ["upload_pairs_failure_count"]="counter"
     ["disk_files_gauge"]="gauge"
     ["swift_objects_gauge"]="gauge"
 )
 
 # Initialize metrics/stats files with 0 if they don't exist
-{
 for metric_filename in "${!metric_types[@]}"
 do
     metric_file_fullname="${STATS_DIR}/$metric_filename"
     [[ -e "$metric_file_fullname" ]] || echo "0" > "$metric_file_fullname"
 done
-}
 
 # get_metric takes the metric name, reads the metric file, and echos the value
 get_metric() {
@@ -86,7 +83,7 @@ update_metric() {
     STAT_NAME="$1"
     VALUE="$2"
     STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
-    echo "$VALUE" > $STAT_FULL_FILENAME
+    echo "$VALUE" > "$STAT_FULL_FILENAME"
 }
 
 # increment increments a stats counter $1 by 1
@@ -154,9 +151,9 @@ then
 fi
 if [[ "$FAILED" == "true" ]]
 then
-    increment save_to_disk_failure_count
+    increment save_pairs_to_disk_failure_count
 else
-    increment save_to_disk_success_count
+    increment save_pairs_to_disk_success_count
 fi
 
 if [[ "$SWIFT_TEMPAUTH_UPLOAD" != "true" ]]
@@ -174,7 +171,6 @@ increment upload_attempt_count
 SWIFT="kubectl -n openstack exec -i openstack-admin-client --
 env -i ST_AUTH=$ST_AUTH ST_USER=$ST_USER ST_KEY=$ST_KEY
 /var/lib/openstack/bin/swift"
-export SWIFT
 
 # Create the container if it doesn't exist
 if ! $SWIFT stat "$CONTAINER" > /dev/null
@@ -197,7 +193,6 @@ upload_file() {
       FAILED_UPLOAD=true
     fi
 }
-export -f upload_file
 
 # find created backups and upload them
 cd "$BACKUP_DIR" || exit 2
@@ -211,9 +206,9 @@ done
 
 if [[ "$FAILED_UPLOAD" == "true" ]]
 then
-    increment upload_failure_count
+    increment upload_pairs_failure_count
 else
-    increment upload_success_count
+    increment upload_pairs_success_count
 fi
 
 touch "$BACKUP_DIR/last_upload"
