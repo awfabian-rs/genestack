@@ -136,6 +136,13 @@ $metric{label=\"ovn-backup\"} $(get_metric "$metric")" | \
           "$PROMETHEUS_PUSHGATEWAY_URL/metrics/job/$PROMETHEUS_JOB_NAME" \
           --data-binary @-
     done
+
+    # Put metrics in the log if running at DEBUG level.
+    perl -ne 'print "$ARGV $_"' /backup/stats/* | cut -d / -f 4 | \
+    while read -r read_metric
+    do
+        log_line DEBUG "run end metric $read_metric"
+    done
 }
 trap finalize_and_upload_metrics EXIT INT TERM HUP
 
