@@ -59,7 +59,7 @@ declare -A metric_types=(
     ["upload_pairs_success_count"]="counter"
     ["upload_pairs_success_timestamp"]="counter"
     ["upload_pairs_failure_count"]="counter"
-    ["upload_pairs_failure_timestamp"="counter"
+    ["upload_pairs_failure_timestamp"]="counter"
     ["disk_files_gauge"]="gauge"
     ["swift_objects_gauge"]="gauge"
 )
