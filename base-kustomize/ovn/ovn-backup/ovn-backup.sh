@@ -77,7 +77,7 @@ get_metric() {
     local STAT_FULL_FILENAME
     STAT_NAME="$1"
     STAT_FULL_FILENAME="${STATS_DIR}/$STAT_NAME"
-    VALUE="$(cat $STAT_FULL_FILENAME)"
+    VALUE="$(cat "$STAT_FULL_FILENAME")"
     echo "$VALUE"
 }
 
@@ -131,7 +131,7 @@ finalize_and_upload_metrics() {
     for metric in "${!metric_types[@]}"
     do
         echo "# TYPE $metric ${metric_types[$metric]}
-$metric{label=\"ovn-backup\"} $(get_metric $metric)" | \
+$metric{label=\"ovn-backup\"} $(get_metric "$metric")" | \
         curl -sS \
           "$PROMETHEUS_PUSHGATEWAY_URL/metrics/job/$PROMETHEUS_JOB_NAME" \
           --data-binary @-
@@ -216,7 +216,7 @@ cd "$BACKUP_DIR" || exit 2
 
 FAILED_UPLOAD=false
 find "$YMD" -type f -newer "$BACKUP_DIR/last_upload" | \
-while read file
+while read -r file
 do
     upload_file "$file"
 done
