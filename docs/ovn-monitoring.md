@@ -40,8 +40,8 @@
 
 In a full _Genestack_ installation, you can view Prometheus metrics:
 
-- by querying _Prometheus_' HTTPS API
 - by using _Prometheus_' UI
+- by querying _Prometheus_' HTTPS API
 - by using _Grafana_
     - In particular, _Kube-OVN_ provides pre-defined Grafana dashboards
       installed in _Genestack_.
@@ -71,3 +71,29 @@ dashboards as described below.
 
 As mentioned above, the _Kube-OVN_ documentation details the collected metrics
 [here](https://kubeovn.github.io/docs/stable/en/reference/metrics)
+
+### Prometheus API
+
+You will probably need a strong understanding of the Prometheus data model and
+_PromQL_ to use the _Prometheus_ API directly, and will likely find little use
+for using the API interactively.
+
+However, where you have a working `kubectl`, you can do something like the
+following to use `curl` on the Prometheus API with minor adaptations for your
+installation:
+
+```
+# Run kubectl proxy in the background
+kubectl proxy &
+
+# You will probably find the -g/--globoff option to curl useful to stop curl
+# itself from interpreting the characters {} [] in URLs.
+#
+# Additionally, these characters technically require escaping in URLs, so you
+# might want to use --data-urlencode
+
+curl -sS -gG \
+http://localhost:8001/api/v1/namespaces/prometheus/services/prometheus-operated:9090/proxy/api/v1/query \
+--data-urlencode 'query=kube_ovn_ovn_status' | jq .
+```
+
