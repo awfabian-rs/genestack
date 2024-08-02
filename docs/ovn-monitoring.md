@@ -97,3 +97,89 @@ http://localhost:8001/api/v1/namespaces/prometheus/services/prometheus-operated:
 --data-urlencode 'query=kube_ovn_ovn_status' | jq .
 ```
 
+### Grafana
+
+As mentioned previously, _Kube-OVN_ provides various dashboards with
+information on both the control plane and data plane network quality.
+
+These dashboards contain a lot of information, so in many cases, you will likely
+use them for troubleshooting by expanding to a large timeframe to see when
+irregularities may have started occurring.
+
+You can see the documentation from _Kube-OVN_ on these dashboards
+[here](https://kubeovn.github.io/docs/stable/en/guide/prometheus-grafana/)
+
+Some additional details on each of these dashboards follows.
+
+#### Controller dashboard
+
+In a typical _Genestack_ installation, you should see 3 controllers up here.
+The dashboard displays the number of up controllers prominently.
+
+The graphs show information about the `kube-ovn-controller` pods in the
+`kube-system` namespace, mostly identified by their ClusterIP on the k8s
+service network. You can typically see them along with the ClusterIPs that
+identify them individually on the dashboard like:
+
+```
+kubectl -n kube-system get pod -l app=kube-ovn-controller -o wide
+```
+
+#### Kube-OVN-CNI dashboard
+
+In this case, CNI refers to k8s' _container network interface_ which allows
+k8s to use various plugins (such as _Kube-OVN_) for cluster networking, as
+described [here](https://kubeovn.github.io/docs/stable/en/reference/architecture/#kube-ovn-cni)
+
+Like the Controller dashboard, it displays the number of pods up prominently.
+It should have 1 pod for each k8s node, so it should match the count of your
+k8s nodes:
+
+```
+# tail to skip header lines
+kubectl get node | tail -n +2 | wc -l
+```
+
+These metrics belong to the 'control plane' metrics, and this dashboard will
+probably work well by using a large timeframe to find anomalous behavior as
+previously described.
+
+#### OVN dashboard
+
+This dashboard displays some metrics from the OVN, like the number of logical
+switches and logical ports. It shows a chassis count that should match the
+number of nodes in your cluster, and a flag (or technically a count, but you
+will see "1") for "OVN DB Up".
+
+This dashboard looks useful as previously described for looking for anomalous
+behavior that emerged across a timeframe.
+
+#### OVS dashboard
+
+This dashboard displays information from OVS from each k8s node.
+
+It sometimes uses names, but sometimes pod IPs.
+
+OVS activity across nodes might not necessarily have a strong correlation, so
+on this dashboard, you might take particular note that you can click the node
+of interest on the legend for each graph, or choose a particular instance for
+all of the graphs at the top.
+
+You may need to collate the ClusterIPs with a node, which you can do with
+something like:
+
+```
+kubectl get node -n kube-system -o wide | grep 10.10.10.10
+```
+
+which will display the name of the node with the pinger pod.
+[kube-ovn-pinger](https://kubeovn.github.io/docs/stable/en/reference/architecture/#kube-ovn-pinger)
+collects OVS status information, so while you see the `pinger` pod when checking
+the IP, the information from the dashboard may *come from* the pinger pod, but
+*pertains to* OVS, *not* the pinger pod.
+
+#### Pinger dashboard
+
+This dashboard prominently displays the OVS up count, OVN-Controller up count,
+and API server accessible count. These should all have the same number, equal to
+your number of nodes.
