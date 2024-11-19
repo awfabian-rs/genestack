@@ -52,7 +52,6 @@ echo "Including overrides in order:"
 values_args=()
 for BASE_FILENAME in $(get_chart_info -l "$CHART" values_files)
 do
-    #get_chart_info -l "$CHART" values_files
     for DIR in "$GENESTACK_CHART_DIR" "$GENESTACK_CHART_CONFIG_DIR"
     do
         ABSOLUTE_PATH="$DIR/$BASE_FILENAME"
