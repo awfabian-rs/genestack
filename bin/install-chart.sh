@@ -27,7 +27,8 @@ get_chart_info() {
     fi
     local CHART="$1"
     local PARAM="$2"
-    local result="$($GOJQ -r --yaml-input ".$CHART.$PARAM$LIST" "$CHART_META_FILE")"
+    local result
+    result="$($GOJQ -r --yaml-input ".$CHART.$PARAM$LIST" "$CHART_META_FILE")"
     if [[ "$result" == "null" ]]
     then
         echo "missing \"$CHART\" parameter \"$PARAM\"" > /dev/fd/2
