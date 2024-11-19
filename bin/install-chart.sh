@@ -73,7 +73,7 @@ echo
 
 $ECHOTEST helm repo add prometheus-community "$URL"
 $ECHOTEST helm repo update
-$ECHOTEST helm upgrade --install "$REPO/$CHART_NAME" \
+$ECHOTEST helm upgrade --install "$HELM_RELEASE_NAME" "$REPO/$CHART_NAME" \
     --create-namespace --namespace="$NAMESPACE" \
     --timeout 10m \
     "${values_args[@]}" \
