@@ -38,6 +38,12 @@ get_chart_info() {
     fi
 }
 
+for var in repo helm_release_name chart_name url namespace
+do
+    var_name="$(echo "$var" | tr a-z A-Z)"
+    declare "$var_name=$(get_chart_info "$CHART" "$var")"
+done
+
 GENESTACK_DIR="${GENESTACK_DIR:-/opt/genestack}"
 GENESTACK_CONFIG_DIR="${GENESTACK_CONFIG_DIR:-/etc/genestack}"
 
@@ -65,11 +71,10 @@ do
 done
 echo
 
-$ECHOTEST helm repo add prometheus-community "$(get_chart_info "$CHART" url)"
+$ECHOTEST helm repo add prometheus-community "$URL"
 $ECHOTEST helm repo update
-$ECHOTEST helm upgrade \
-    --install "$(get_chart_info "$CHART" helm_release_name)" \
-    --create-namespace --namespace="$(get_chart_info "$CHART" namespace)" \
+$ECHOTEST helm upgrade --install "$REPO/$CHART_NAME" \
+    --create-namespace --namespace="$NAMESPACE" \
     --timeout 10m \
     "${values_args[@]}" \
     --post-renderer "$GENESTACK_DIR/base-kustomize/kustomize.sh" \
