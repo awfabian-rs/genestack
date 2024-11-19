@@ -12,6 +12,12 @@ GENESTACK_DIR="${GENESTACK_DIR:-/opt/genestack}"
 CHART_META_FILE=\
 "${CHART_META_FILE:-$GENESTACK_DIR/bin/chart-install-meta.yaml}"
 
+if ! GOJQ="$(command -v gojq)"
+then
+    echo "Please install gojq for reading $CHART_META_FILE"
+    exit 1
+fi
+
 get_chart_info() {
     local LIST=""
     if [[ "$1" == "-l" ]]
