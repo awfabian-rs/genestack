@@ -6,6 +6,10 @@
 # Using 'helm' commands to add a repo, like `helm repo add`, gives the repo a
 # name. No analog exists in a kustomization.yaml under `helmCharts`, but here,
 # you also specify a repoName which appears as the name in `helm repo list`.
+#
+# overlayDir is optional and defaults to 'overlay', and doesn't come from
+# `helmCharts` conventions
+
 prometheus:
   repoName: prometheus-community
   releaseName: kube-prometheus-stack
@@ -16,3 +20,4 @@ prometheus:
     - prometheus-helm-overrides.yaml
     - alerting_rules.yaml
     - alertmanager_config.yaml
+  overlayDir: overlay

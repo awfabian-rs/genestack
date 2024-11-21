@@ -79,4 +79,4 @@ run_or_test_print helm upgrade --install "$RELEASENAME" "$REPONAME/$NAME" \
     --timeout 10m \
     "${values_args[@]}" \
     --post-renderer "$GENESTACK_CONFIG_DIR/kustomize/kustomize.sh" \
-    --post-renderer-args "$CHART/overlay" "$@"
+    --post-renderer-args "$CHART/${OVERLAYDIR:-overlay}" "$@"
