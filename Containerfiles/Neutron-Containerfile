@@ -1,8 +1,9 @@
-# Patch oslo_db to help with deadlocks
 ARG VERSION=master-ubuntu_jammy
 FROM openstackhelm/neutron:$VERSION as build
 ARG PLUGIN_VERSION=master
 RUN apt update && apt install -y git
+
+# Patch oslo_db to help with deadlocks
 RUN export ORIG_PLUGIN_VERSION="${PLUGIN_VERSION}"; \
 if [ "${PLUGIN_VERSION}" != 'master' ]; then export PLUGIN_VERSION=stable/${PLUGIN_VERSION}; fi; \
 . /var/lib/openstack/bin/activate; \
