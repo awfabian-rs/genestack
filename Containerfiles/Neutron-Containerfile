@@ -1,0 +1,10 @@
+ARG VERSION=master-ubuntu_jammy
+FROM openstackhelm/neutron:$VERSION as build
+ARG NEUTRON_VERSION=default
+RUN if [ "$NEUTRON_VERSION" != "default" ]; then \
+    apt update && apt install -y git ; . /var/lib/openstack/bin/activate ; \
+    /var/lib/openstack/bin/pip install \
+        git+https://opendev.org/openstack/neutron.git@${NEUTRON_VERSION}#egg=neutron ; \
+    fi;
+FROM openstackhelm/neutron:${VERSION}
+COPY --from=build /var/lib/openstack/. /var/lib/openstack/
