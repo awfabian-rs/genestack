@@ -1,0 +1,14 @@
+modules:
+  f5:
+    version: 2c
+    auth:
+      community: flexmgr
+    walk:
+      - 1.3.6.1.4.1.3375.2.1.14.3.1
+    metrics:
+      - name: f5_sysCmFailoverStatusId
+        oid: 1.3.6.1.4.1.3375.2.1.14.3.1
+        type: gauge
+        help: "F5 Failover Status"
+        # https://my.f5.com/manage/s/article/K14399
+        # to know what each numeric value means

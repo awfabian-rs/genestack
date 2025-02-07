@@ -1,4 +1,11 @@
 sortOptions:
   order: fifo
+configMapGenerator:
+  - name: snmp-exporter-configmap
+    namespace: prometheus
+    files:
+      - snmp.yaml
+generatorOptions:
+  disableNameSuffixHash: true
 resources:
   - all.yaml
