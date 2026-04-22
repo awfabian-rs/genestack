@@ -92,7 +92,7 @@ If the current version does not match `<from-version>`, stop and reassess.
 
 Verify backups, snapshots, or restore points are available.
 
-For any DB-backed or schema-migrating OpenStack service, treat a fresh MariaDB backup as mandatory before the upgrade. The repo currently contains the backup script at `(opt)/scripts/backup-mariadb.sh`; the docs also mention `(opt)/bin/backup-mariadb.sh`. In any case, take a database backup before proceeding.
+For any DB-backed or schema-migrating OpenStack service, treat a fresh MariaDB backup as mandatory before the upgrade. This generally only works from a node in the cluster, not an overseer type node. The repo currently contains the backup script at `(opt)/scripts/backup-mariadb.sh`; the docs also mention `(opt)/bin/backup-mariadb.sh`. In any case, take a database backup before proceeding.
 
 Expected:
 
@@ -137,7 +137,6 @@ Check for unhealthy pods, jobs, or dependent services:
 ```bash
 kubectl -n openstack get pods
 kubectl -n openstack get jobs
-kubectl -n openstack get pods | grep -E 'mariadb|rabbitmq|memcached|keystone'
 helm status <component-name> -n openstack
 ```
 
@@ -262,6 +261,8 @@ Verify dependent services:
 ```bash
 kubectl -n openstack get pods | grep -E 'mariadb|rabbitmq|memcached|keystone'
 ```
+
+You will likely want to pay particular attention to mariadb, rabbitmq, memcached, and keystone
 
 Verify logs or events for upgrade failures:
 
