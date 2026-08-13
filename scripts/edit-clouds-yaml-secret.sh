@@ -114,11 +114,15 @@ done
 
 encoded=$(base64 <"$tmp" | tr -d '\r\n')
 patch_file="$tmpdir/patch.json"
+encoded_before_file="$tmpdir/encoded-before"
+encoded_after_file="$tmpdir/encoded-after"
+printf '%s' "$encoded_before" >"$encoded_before_file"
+printf '%s' "$encoded" >"$encoded_after_file"
 
 jq -n \
   --arg path "/data/$key" \
-  --arg before "$encoded_before" \
-  --arg after "$encoded" '
+  --rawfile before "$encoded_before_file" \
+  --rawfile after "$encoded_after_file" '
     [
       {
         op: "test",

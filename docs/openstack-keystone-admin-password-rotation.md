@@ -687,12 +687,14 @@
     Exact old-value matches remaining: 0
     ```
 
-    The `<service>-keystone-admin` Secrets in this list provide
-    credentials to OpenStack-Helm bootstrap / `ks-user` Jobs. They are not
-    mounted as runtime credentials by the services' long-running pods, so
-    updating these Secrets does not itself require restarting all of those
-    workloads. The later restart and chart-reinstallation steps cover the
-    places where the running configuration consumes the admin password.
+    Most `<service>-keystone-admin` Secrets in this list are primarily
+    used by OpenStack-Helm bootstrap / `ks-user` Jobs, so updating them
+    does not mean that every corresponding service workload requires a
+    restart. There are exceptions where workloads consume the admin
+    credential directly or through generated configuration. The restart
+    and chart-reinstallation steps below cover the runtime consumers
+    identified for this procedure, including Neutron netns cleanup and
+    Octavia.
 
 1. Pre-check `neutron-netns-cleanup-cron-default` logs (not canary)
     - This mirrors the canary step above, but the _DaemonSet_ needs a
