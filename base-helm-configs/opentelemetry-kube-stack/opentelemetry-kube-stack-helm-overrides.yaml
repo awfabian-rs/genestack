@@ -21,9 +21,8 @@ opentelemetry-operator:
   manager:
     collectorImage:
       repository: otel/opentelemetry-collector-contrib
-      # Keep the Collector distribution and version explicit. The contrib
-      # distribution is required for site-specific receivers such as SNMP.
-      tag: 0.141.0
+      # The contrib distribution is required for site-specific receivers such
+      # as SNMP. Its version is inherited from the pinned stack chart.
   admissionWebhooks:
     failurePolicy: "Ignore"
   crds:

@@ -12,12 +12,13 @@ would poll the same targets and remote-write duplicate series. A site that
 enables F5 polling must keep the Deployment Collector at one replica unless it
 also introduces explicit target sharding.
 
-The `opentelemetry-kube-stack` chart is pinned at `0.13.1`, whose operator
-defaults to Collector `0.141.0`. Genestack explicitly selects
-`otel/opentelemetry-collector-contrib:0.141.0`; the core or Kubernetes
-distribution does not contain the SNMP receiver. In Collector `0.141.0`, the
-SNMP receiver's metrics support is Alpha. Treat an upgrade as a compatibility
-event and validate the receiver configuration before rollout.
+The `opentelemetry-kube-stack` chart is pinned at `0.13.1`; its operator
+dependency supplies Collector version `0.141.0`. Genestack overrides only the
+repository to select the Contrib distribution and inherits the tag from the
+pinned chart. The core and Kubernetes distributions do not contain the SNMP
+receiver. In Collector `0.141.0`, the SNMP receiver's metrics support is Alpha.
+Treat a chart upgrade as a compatibility event and validate the resolved image
+and receiver configuration before rollout.
 
 Genestack's existing Helm values are the extension mechanism: a site override
 adds named receivers, processors, environment variables, and service
@@ -138,7 +139,8 @@ that can alert on a missing receiver definition.
 ## Operational controls
 
 - Keep the initial scope to the one failover scalar and two receivers.
-- Keep the Collector image and chart pinned.
+- Keep the stack chart pinned; verify its resolved Contrib Collector image on
+  every chart update.
 - Keep exactly one Deployment Collector replica unless polling is sharded.
 - Permit outbound UDP/161 from the Deployment Collector pod network and add
   that source network to the F5 SNMP allowlist.
