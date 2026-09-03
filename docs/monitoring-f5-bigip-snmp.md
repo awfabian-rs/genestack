@@ -50,18 +50,15 @@ aggressive load on the appliances.
 
 The DFW override adds these stable, low-cardinality OTel resource attributes:
 
-- `deployment.environment`
-- `site`
+- `environment`
 - `ha_pair`
 - `device`
-- `vendor`
-- `device_role`
 
 Prometheus Remote Write has `resource_to_telemetry_conversion` enabled, so the
-expected Prometheus labels are `deployment_environment`, `site`, `ha_pair`,
-`device`, `vendor`, and `device_role`. The DFW datapoint processor also adds
-the existing `cluster="dfw-dev"` label. Device identity is not derived from an
-IP address.
+expected Prometheus labels are `environment`, `ha_pair`, and `device`. The F5
+pipelines intentionally omit the shared DFW `cluster` datapoint processor so
+the metric identity remains small. Device identity is not derived from an IP
+address.
 
 ## Secret contract
 
