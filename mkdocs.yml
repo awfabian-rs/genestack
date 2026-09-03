@@ -239,6 +239,7 @@ nav:
               - Monitoring and Observability Overview: monitoring-observability-overview.md
               - Getting Started: monitoring-getting-started.md
               - OpenTelemetry: monitoring-opentelemetry.md
+              - F5 BIG-IP SNMP Monitoring: monitoring-f5-bigip-snmp.md
               - Prometheus: monitoring-prometheus.md
               - Loki: monitoring-loki.md
               - Tempo: monitoring-tempo.md

@@ -12,18 +12,23 @@ The repository keeps the chart values and overlays in service-specific directori
 
 ## Default Receivers
 
-The default configuration enables:
+The centralized Deployment Collector enables:
 
+- OTLP
 - MySQL
 - RabbitMQ
 - Memcached
+- Prometheus infrastructure scraping
+- HTTPCheck with placeholder targets
 
 ## Additional Receivers
 
-- PostgreSQL
-- HTTPCheck
-- 
-The deployment collector also includes placeholder `httpcheck` targets. 
+- PostgreSQL is enabled by site overrides where required.
+- F5 BIG-IP SNMP support is available to site overrides and is enabled in DFW
+  development. It is not a globally enabled receiver. See
+  [F5 BIG-IP SNMP Monitoring](monitoring-f5-bigip-snmp.md).
+
+The base Deployment Collector includes placeholder `httpcheck` targets.
 Update those endpoints in the base or service override values for your environment before relying on that receiver.
 
 ## Secret and Database Preparation
