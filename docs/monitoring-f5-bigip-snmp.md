@@ -125,13 +125,15 @@ reachable F5 reporting state 0, 1, or 2 from a poll that produces no telemetry.
 The counter survives a Remote Write outage because Prometheus scrapes Collector
 self-telemetry directly. `increase()` handles Collector counter resets.
 
-Separate rules cover the complete Deployment Collector being down and
-`otelcol_exporter_send_failed_metric_points_total{exporter="prometheusremotewrite"}`
-increasing. If a receiver is removed from the Collector configuration, its
-self-telemetry series also disappears and cannot identify an expected target.
-Static rendering and review protect against that configuration error. The next
-improvement, once a source-controlled target inventory exists, is an
-expected-target info metric that can alert on a missing receiver definition.
+The F5 rules do not include generic Collector-down or Prometheus Remote Write
+failure alerts. If the complete Deployment Collector is down, its ServiceMonitor
+is absent, or a receiver is removed from configuration, the scraper counter
+disappears and cannot identify the expected target. A Remote Write failure can
+also prevent the state metric from reaching Prometheus while this directly
+scraped counter continues to increase. Those stack-wide conditions need
+separately owned platform alerts. The next F5-specific improvement, once a
+source-controlled target inventory exists, is an expected-target info metric
+that can alert on a missing receiver definition.
 
 ## Operational controls
 
@@ -140,8 +142,8 @@ expected-target info metric that can alert on a missing receiver definition.
 - Keep exactly one Deployment Collector replica unless polling is sharded.
 - Permit outbound UDP/161 from the Deployment Collector pod network and add
   that source network to the F5 SNMP allowlist.
-- Monitor Collector availability, per-receiver scrape counters, errors, and
-  Prometheus Remote Write failures.
+- Provide separately owned platform alerts for Collector availability and
+  Prometheus Remote Write failures; the F5 policy monitors per-receiver progress.
 - Validate component availability and configuration on every Collector upgrade.
 - Roll back by reverting the site override and rules; do not reintroduce
   `prometheus-snmp-exporter`.
