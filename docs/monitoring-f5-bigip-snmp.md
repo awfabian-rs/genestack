@@ -71,18 +71,12 @@ must contain these keys:
 | `username` | Current SNMPv3 user |
 | `auth-password` | SNMPv3 authentication password |
 | `privacy-password` | SNMPv3 privacy password |
-| `member-1-endpoint` | First complete `udp://...:161` endpoint |
-| `member-1-device` | First stable device/member name |
-| `member-2-endpoint` | Second complete `udp://...:161` endpoint |
-| `member-2-device` | Second stable device/member name |
-| `ha-pair` | Stable HA-pair identity shared by both members |
 
-No Secret manifest or credential value is stored in Git. `FLEXMON` and the
-addresses `72.32.255.128` and `72.32.255.129` appeared in historical work, but
-the addresses were for DFW staging and neither source-controlled DFW
-development configuration nor its history confirms current values. Operators
-must verify the current username, target endpoints, and stable names before
-creating the Secret.
+No Secret manifest or credential value is stored in Git. The non-sensitive
+management endpoints, stable device names, and HA-pair identity belong in the
+site-specific Collector override under `/etc/genestack`, not in this Secret or
+the reusable Genestack base configuration. The historical username `FLEXMON`
+remains informational until operations confirms the current credential.
 
 One safe creation pattern uses protected files and never prints their values:
 
@@ -91,11 +85,6 @@ kubectl -n monitoring create secret generic f5-bigip-snmp \
   --from-file=username=/secure/f5-snmp/username \
   --from-file=auth-password=/secure/f5-snmp/auth-password \
   --from-file=privacy-password=/secure/f5-snmp/privacy-password \
-  --from-file=member-1-endpoint=/secure/f5-snmp/member-1-endpoint \
-  --from-file=member-1-device=/secure/f5-snmp/member-1-device \
-  --from-file=member-2-endpoint=/secure/f5-snmp/member-2-endpoint \
-  --from-file=member-2-device=/secure/f5-snmp/member-2-device \
-  --from-file=ha-pair=/secure/f5-snmp/ha-pair \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
