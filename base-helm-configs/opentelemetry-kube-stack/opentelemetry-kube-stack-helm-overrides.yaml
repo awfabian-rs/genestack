@@ -21,6 +21,8 @@ opentelemetry-operator:
   manager:
     collectorImage:
       repository: otel/opentelemetry-collector-contrib
+      # The contrib distribution is required for site-specific receivers such
+      # as SNMP. Its version is inherited from the pinned stack chart.
   admissionWebhooks:
     failurePolicy: "Ignore"
   crds:
