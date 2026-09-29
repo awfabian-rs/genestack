@@ -44,9 +44,13 @@ def credential_string(value: str) -> str:
     return value
 
 
+def preserve_option_case(optionstr: str) -> str:
+    return optionstr
+
+
 def parse_ini(text: str) -> IniDocument:
     parser = configparser.ConfigParser(interpolation=None, strict=True, inline_comment_prefixes=None)
-    parser.optionxform = str
+    parser.optionxform = preserve_option_case
     try:
         parser.read_string(text)
     except (configparser.Error, ValueError):

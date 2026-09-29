@@ -7,7 +7,7 @@ a round-trip writer. Aliases, merge keys, complex keys and custom tags fail clos
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
@@ -50,7 +50,11 @@ def parse_yaml(text: str) -> YamlValue:
         raise RepresentationError("document_too_large", "YAML document exceeds the size limit.")
     try:
         # compose preserves tag distinctions and locations without constructing objects.
-        node = yaml.compose(text, Loader=yaml.SafeLoader)
+        # types-PyYAML leaves compose's return type unknown at this library boundary.
+        node = cast(
+            Node | None,
+            yaml.compose(text, Loader=yaml.SafeLoader),  # pyright: ignore[reportUnknownMemberType]
+        )
     except (yaml.YAMLError, RecursionError, ValueError):
         raise RepresentationError("invalid_yaml", "YAML parsing failed; input withheld.") from None
     if node is None:
