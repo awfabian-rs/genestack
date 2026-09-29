@@ -1,0 +1,419 @@
+{
+  "apiVersion": "v1",
+  "kind": "SecretList",
+  "metadata": {
+    "resourceVersion": "1000"
+  },
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-000",
+        "resourceVersion": "100"
+      },
+      "data": {
+        "password": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ=="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "barbican-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-001",
+        "resourceVersion": "101"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "cinder-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-002",
+        "resourceVersion": "102"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "glance-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-003",
+        "resourceVersion": "103"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "gnocchi-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-004",
+        "resourceVersion": "104"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "heat-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-005",
+        "resourceVersion": "105"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "magnum-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-006",
+        "resourceVersion": "106"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "placement-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-007",
+        "resourceVersion": "107"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "skyline-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-008",
+        "resourceVersion": "108"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "zaqar-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-009",
+        "resourceVersion": "109"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "nova-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-010",
+        "resourceVersion": "110"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "octavia-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-011",
+        "resourceVersion": "111"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "blazar-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-012",
+        "resourceVersion": "112"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "keystone-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-013",
+        "resourceVersion": "113"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "neutron-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-014",
+        "resourceVersion": "114"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "ceilometer-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-015",
+        "resourceVersion": "115"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "freezer-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-016",
+        "resourceVersion": "116"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "trove-keystone-admin",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-017",
+        "resourceVersion": "117"
+      },
+      "data": {
+        "OS_PASSWORD": "U1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMQ==",
+        "OS_USERNAME": "YWRtaW4=",
+        "OS_PROJECT_NAME": "YWRtaW4=",
+        "OS_USER_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_PROJECT_DOMAIN_NAME": "ZGVmYXVsdA==",
+        "OS_AUTH_URL": "aHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjM="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "octavia-etc",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-018",
+        "resourceVersion": "118"
+      },
+      "data": {
+        "octavia.conf": "W3NlcnZpY2VfYXV0aF0KdXNlcm5hbWUgPSBhZG1pbgpwYXNzd29yZCA9IFNZTlRIRVRJQ19BZG1pbl9SZWZlcmVuY2VfMDAwMDAwMDEKcHJvamVjdF9uYW1lID0gYWRtaW4KW2RhdGFiYXNlXQpjb25uZWN0aW9uID0gbXlzcWwrcHlteXNxbDovL3N5bnRoZXRpYy1zZXJ2aWNlOk5PVF9BTl9BRE1JTl9QQVNTV09SREBkYi5pbnZhbGlkL2V4YW1wbGUK"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "octavia-worker-default",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-019",
+        "resourceVersion": "119"
+      },
+      "data": {
+        "octavia.conf": "W3NlcnZpY2VfYXV0aF0KdXNlcm5hbWUgPSBhZG1pbgpwYXNzd29yZCA9IFNZTlRIRVRJQ19BZG1pbl9SZWZlcmVuY2VfMDAwMDAwMDEKcHJvamVjdF9uYW1lID0gYWRtaW4KW2RhdGFiYXNlXQpjb25uZWN0aW9uID0gbXlzcWwrcHlteXNxbDovL3N5bnRoZXRpYy1zZXJ2aWNlOk5PVF9BTl9BRE1JTl9QQVNTV09SREBkYi5pbnZhbGlkL2V4YW1wbGUK"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "octavia-health-manager-default",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-020",
+        "resourceVersion": "120"
+      },
+      "data": {
+        "octavia.conf": "W3NlcnZpY2VfYXV0aF0KdXNlcm5hbWUgPSBhZG1pbgpwYXNzd29yZCA9IFNZTlRIRVRJQ19BZG1pbl9SZWZlcmVuY2VfMDAwMDAwMDEKcHJvamVjdF9uYW1lID0gYWRtaW4KW2RhdGFiYXNlXQpjb25uZWN0aW9uID0gbXlzcWwrcHlteXNxbDovL3N5bnRoZXRpYy1zZXJ2aWNlOk5PVF9BTl9BRE1JTl9QQVNTV09SREBkYi5pbnZhbGlkL2V4YW1wbGUK"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "blazar-etc",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-021",
+        "resourceVersion": "121"
+      },
+      "data": {
+        "blazar.conf": "W0RFRkFVTFRdCm9zX2FkbWluX3VzZXJuYW1lID0gYWRtaW4Kb3NfYWRtaW5fcGFzc3dvcmQgPSBTWU5USEVUSUNfQWRtaW5fUmVmZXJlbmNlXzAwMDAwMDAxCnByb2plY3RfbmFtZSA9IGFkbWluCltkYXRhYmFzZV0KY29ubmVjdGlvbiA9IG15c3FsK3B5bXlzcWw6Ly9zeW50aGV0aWMtc2VydmljZTpOT1RfQU5fQURNSU5fUEFTU1dPUkRAZGIuaW52YWxpZC9leGFtcGxlCg=="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "openstack-config",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-022",
+        "resourceVersion": "122"
+      },
+      "data": {
+        "clouds.yaml": "Y2xvdWRzOgogIGRlZmF1bHQ6CiAgICBhdXRoOgogICAgICB1c2VybmFtZTogYWRtaW4KICAgICAgcGFzc3dvcmQ6IFNZTlRIRVRJQ19BZG1pbl9SZWZlcmVuY2VfMDAwMDAwMDEKICAgICAgcHJvamVjdF9uYW1lOiBhZG1pbgogICAgICBhdXRoX3VybDogaHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjMKICAgIHZlcmlmeTogdHJ1ZQo="
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "clouds-yaml-secret",
+        "namespace": "openstack",
+        "uid": "fixture-dfw-dev-023",
+        "resourceVersion": "123"
+      },
+      "data": {
+        "generated-clouds-yaml": "Y2xvdWRzLnlhbWw6ICJjbG91ZHM6XG4gIGRlZmF1bHQ6XG4gICAgYXV0aDpcbiAgICAgIHVzZXJuYW1lOiBhZG1pblxuICAgICAgcGFzc3dvcmQ6XAogIFwgU1lOVEhFVElDX0FkbWluX1JlZmVyZW5jZV8wMDAwMDAwMVxuICAgICAgcHJvamVjdF9uYW1lOiBhZG1pblxuICAgICAgYXV0aF91cmw6XAogIFwgaHR0cHM6Ly9pZGVudGl0eS5leGFtcGxlLmludmFsaWQvdjNcbiAgICB2ZXJpZnk6IHRydWVcbiIK"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "unrelated-fixture-secret",
+        "namespace": "openstack",
+        "uid": "fixture-unrelated",
+        "resourceVersion": "999"
+      },
+      "data": {
+        "binary.bin": "/wAH"
+      }
+    }
+  ]
+}
