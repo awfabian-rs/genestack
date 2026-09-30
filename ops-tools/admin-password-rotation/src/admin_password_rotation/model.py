@@ -122,7 +122,7 @@ class SecretSnapshot:
 @dataclass(frozen=True)
 class SecretInventory:
     namespace: str
-    resource_version: str
+    resource_version: str | None
     secrets: tuple[SecretSnapshot, ...] = field(repr=False)
 
 
@@ -179,7 +179,7 @@ class RestartDependency:
 @dataclass(frozen=True)
 class TopologyPlan:
     namespace: str
-    inventory_resource_version: str
+    inventory_resource_version: str | None
     input_mode: str
     inventory_secret_count: int
     locations: tuple[LocationObservation, ...]

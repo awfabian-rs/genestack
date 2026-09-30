@@ -53,9 +53,12 @@ def inventory(*extra: SecretSnapshot) -> SecretInventory:
     ))
 
 
-def inventory_json(*, data: object | None = None, meta: object | None = None) -> bytes:
+def inventory_json(
+    *, data: object | None = None, meta: object | None = None,
+    kind: str = "SecretList", resource_version: object = "123",
+) -> bytes:
     return json.dumps({
-        "apiVersion": "v1", "kind": "SecretList", "metadata": {"resourceVersion": "123"},
+        "apiVersion": "v1", "kind": kind, "metadata": {"resourceVersion": resource_version},
         "items": [{
             "apiVersion": "v1", "kind": "Secret",
             "metadata": {"namespace": "openstack", "name": "example", "uid": "u", "resourceVersion": "1"} if meta is None else meta,

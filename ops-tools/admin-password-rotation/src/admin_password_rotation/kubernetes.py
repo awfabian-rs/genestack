@@ -62,12 +62,19 @@ def parse_inventory(raw: bytes, namespace: str) -> SecretInventory:
     except (ValueError, UnicodeError, RecursionError):
         raise ReadError("invalid_json", "Secret inventory is not valid JSON; input withheld.") from None
     root = object_mapping(value)
-    if root.get("apiVersion") != "v1" or root.get("kind") not in ("SecretList", "List"):
+    kind = root.get("kind")
+    if root.get("apiVersion") != "v1" or kind not in ("SecretList", "List"):
         raise ReadError("invalid_inventory", "Expected a v1 SecretList or List.")
     metadata = object_mapping(root.get("metadata"))
     if metadata.get("continue") not in (None, ""):
         raise ReadError("incomplete_inventory", "A paginated Secret inventory must be fully collected.")
-    resource_version = nonempty_string(metadata.get("resourceVersion"))
+    resource_version_value = metadata.get("resourceVersion")
+    # kubectl emits a generic List with no collection resourceVersion after
+    # collecting results. Typed SecretList inputs retain the stricter contract.
+    resource_version = (
+        None if kind == "List" and resource_version_value in (None, "")
+        else nonempty_string(resource_version_value)
+    )
     result: list[SecretSnapshot] = []
     names: set[str] = set()
     for item in object_list(root.get("items")):

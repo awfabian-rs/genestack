@@ -62,6 +62,20 @@ def test_snapshot_base64_and_resource_versions() -> None:
     assert result.secrets[0].uid == "u"
 
 
+def test_generic_kubectl_list_may_lack_collection_resource_version() -> None:
+    result = parse_inventory(inventory_json(kind="List", resource_version=""), "openstack")
+    assert result.resource_version is None
+    assert result.secrets[0].resource_version == "1"
+
+
+@pytest.mark.parametrize(("kind", "resource_version"), [
+    ("SecretList", ""), ("SecretList", None), ("List", 1),
+])
+def test_invalid_collection_resource_version_rejected(kind: str, resource_version: object) -> None:
+    with pytest.raises(ReadError, match="invalid_string"):
+        parse_inventory(inventory_json(kind=kind, resource_version=resource_version), "openstack")
+
+
 @pytest.mark.parametrize("data", [{"password": "not base64!!SECRET_SENTINEL"}, {"password": 4}, {"bad key": "YQ=="}, [1, 2]])
 def test_bad_secret_data(data: object) -> None:
     with pytest.raises(ReadError) as error:
