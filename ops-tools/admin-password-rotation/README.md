@@ -10,12 +10,19 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-There are no credential writers, rotation commands, restart operations, Lease
-acquisition, PasswordSafe requests or Keystone requests. Slice 2B provides a
-library boundary for conditional transaction-state persistence, but it is not wired
-to the CLI. State persistence uses the Kubernetes Python API directly. The separate
-Slice 1 live planning adapter runs only `kubectl get secrets -o json` in an explicitly
-named context. Offline fixture mode does not invoke kubectl.
+There are no credential writers, rotation commands, restart operations,
+PasswordSafe requests or Keystone requests. Slice 2B provides a library boundary
+for conditional transaction-state persistence, and Slice 2C provides a separate
+library boundary for temporary cooperative execution ownership using the
+precreated Kubernetes Lease. Neither is wired to the CLI. Both use the Kubernetes
+Python API directly. The separate Slice 1 live planning adapter runs only
+`kubectl get secrets -o json` in an explicitly named context. Offline fixture mode
+does not invoke kubectl.
+
+The Lease defaults are a 120-second duration, 20-second renewal interval and
+60-second renewal deadline. This is cooperative ownership, not hard fencing:
+expiry or takeover does not prove that an old process cannot reach an external
+service, so later workflow code must still reobserve and apply recovery gates.
 
 ## Install and run locally
 

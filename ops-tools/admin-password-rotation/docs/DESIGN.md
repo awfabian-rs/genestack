@@ -1,7 +1,8 @@
 # Design of this bootstrap
 
-Status: implemented Slice 1 choices, the Slice 2A typed state boundary, and Slice
-2B Kubernetes persistence for that state; rotation behavior remains unimplemented.
+Status: implemented Slice 1 choices, the Slice 2A typed state boundary, Slice 2B
+Kubernetes persistence for that state, and Slice 2C cooperative Lease ownership;
+rotation behavior remains unimplemented.
 
 ## Boundaries
 
@@ -17,6 +18,8 @@ Status: implemented Slice 1 choices, the Slice 2A typed state boundary, and Slic
 | `reporting.py` | Explicit allow-listed projection into credential-free text/JSON. |
 | `state.py` | Strict schema-v2 JSON boundary for durable transaction memory. |
 | `state_store.py` | Conditional Kubernetes API Secret persistence and read-after-write validation for `state.json`. |
+| `kubernetes_api.py` | Shared narrow construction boundary for generated Kubernetes API clients. |
+| `lease.py` | Validated Lease observation, conditional ownership operations and sticky local renewal guard. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -124,8 +127,8 @@ ownership and reread relevant state; a saved report cannot be applied.
 Schema version 2 defines the future contents of
 `Secret/openstack/keystone-admin-rotation-state` at `data/state.json`. This slice
 stores that document in a precreated infrastructure Secret; it does not create the
-Secret, acquire a Lease, or perform rotation work. The planning CLI remains
-read-only and does not invoke the state store.
+Secret or perform rotation work. Lease ownership is a separate Slice 2C library
+boundary. The planning CLI remains read-only and invokes neither boundary.
 
 The state is durable transaction memory, not authority over external reality.
 Recorded progress may lag an effect that completed before the next state update.
@@ -171,7 +174,41 @@ After an accepted patch, the store performs a fresh GET, validates the document
 through the normal schema-v2 boundary, checks that the UID is unchanged and that
 the typed state equals the intended state, and returns the new `resourceVersion`.
 An unobservable or contradictory result fails closed. State persistence and Lease
-ownership remain separate concerns; Lease ownership is not implemented in Slice 2B.
+ownership remain separate concerns.
+
+## Cooperative execution ownership
+
+`Lease/openstack/keystone-admin-rotation` provides temporary cooperative ownership
+to one execution UUID. It is precreated infrastructure: the ownership code neither
+creates nor deletes it and adds no Job owner reference. The Lease UID identifies
+the object, while `resourceVersion` is an optimistic-concurrency precondition.
+Acquisition, renewal and release use atomic JSON Patch tests for both values and
+change only Lease ownership fields. Lease observations and revisions are transient
+and are never serialized into schema-v2 `state.json`.
+
+The defaults are a 120-second Lease duration, 20-second renewal interval,
+60-second renewal deadline and 30-second API-call timeout. A dedicated watchdog
+renews independently of future workflow code. Holder or UID changes, ambiguous
+renewals, malformed observations and renewal-deadline expiry make local ownership
+loss/uncertainty sticky for that execution. `assert_owned()` then fails before
+future consequential effects. A lost execution stops renewal and never issues a
+stale cleanup write. Normal release requires locally fresh ownership, then
+reobserves it and uses the same conditional patch discipline.
+
+Lease UTC timestamps are parsed and retained but are not assumed to be synchronized
+with another execution's clock. Foreign-owner takeover eligibility instead requires
+the same UID, holder identity and `resourceVersion` to remain unchanged for the
+observed `leaseDurationSeconds` according to a local monotonic clock. Any record
+change resets that local observation window. This contender-side timer is separate
+from the owner-side monotonic renewal-freshness timer used by `assert_owned()`.
+
+Fresh acquisition, continued same-execution ownership and expired-Lease takeover
+are distinct results. An expired takeover makes the new execution the current
+cooperative owner, but it is explicitly marked as requiring a later recovery gate.
+Lease expiry is not proof that the previous process is dead or unable to call
+Keystone, PasswordSafe or Kubernetes. The Lease is not hard fencing. Future
+mutation code must combine current ownership with fresh external observations,
+object-level concurrency and transaction recovery checks.
 
 ## Security and deployment limits
 
@@ -190,6 +227,7 @@ include raw parser/subprocess messages. Metadata names and configured location I
 remain visible in reports and are operationally sensitive.
 
 Slice 1 planning still uses its constrained, read-only kubectl adapter. Slice 2B
-state persistence instead depends on the Kubernetes Python client and never invokes
-kubectl: the narrow API transport is tested independently from the behavioral fake
-that exercises store semantics. Lease ownership remains a separate Slice 2C concern.
+state persistence and Slice 2C Lease ownership instead depend on the Kubernetes
+Python client and never invoke kubectl. Their narrow API transports are tested
+independently from behavioral fakes that exercise persistence and ownership
+semantics.
