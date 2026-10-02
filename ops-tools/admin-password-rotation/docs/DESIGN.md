@@ -1,7 +1,7 @@
 # Design of this bootstrap
 
-Status: implemented Slice 1 choices plus the Slice 2A typed state boundary; later
-rotation behavior remains unimplemented.
+Status: implemented Slice 1 choices, the Slice 2A typed state boundary, and Slice
+2B Kubernetes persistence for that state; rotation behavior remains unimplemented.
 
 ## Boundaries
 
@@ -16,6 +16,7 @@ rotation behavior remains unimplemented.
 | `planning.py` | Pure function over contract and inventory; derive findings and potential dependencies. |
 | `reporting.py` | Explicit allow-listed projection into credential-free text/JSON. |
 | `state.py` | Strict schema-v2 JSON boundary for durable transaction memory. |
+| `state_store.py` | Conditional Kubernetes API Secret persistence and read-after-write validation for `state.json`. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -122,8 +123,9 @@ ownership and reread relevant state; a saved report cannot be applied.
 
 Schema version 2 defines the future contents of
 `Secret/openstack/keystone-admin-rotation-state` at `data/state.json`. This slice
-defines only immutable types and the strict JSON serialization/validation boundary;
-it does not read or write that Secret, acquire a Lease, or perform rotation work.
+stores that document in a precreated infrastructure Secret; it does not create the
+Secret, acquire a Lease, or perform rotation work. The planning CLI remains
+read-only and does not invoke the state store.
 
 The state is durable transaction memory, not authority over external reality.
 Recorded progress may lag an effect that completed before the next state update.
@@ -151,7 +153,25 @@ same-name replacements. Generated credential generations are represented only as
 credential fingerprints, tokens, raw API responses and free-form diagnostics are
 not fields in the schema. Last errors and verification detail use safe identifier
 codes. Completed-request entries are compact and bounded rather than full historical
-transactions. Retention policy and Kubernetes persistence belong to a later slice.
+transactions. Retention policy belongs to a later slice.
+
+The persistence observation keeps the Secret namespace, name, UID and
+`resourceVersion` outside the serialized transaction model. UID identifies the
+specific Kubernetes object rather than merely its reusable name. Every update is
+derived from one such observation. `KubernetesStateStore` uses a narrow direct
+Kubernetes Python API transport to issue atomic JSON Patch tests for both UID and
+`resourceVersion` before replacing only `data/state.json`. A stale update fails;
+future runner logic must discard its stale decision, reobserve, and revalidate
+rather than retry the same document blindly. Unrelated Secret data and metadata are
+not included in the patch. Explicit kubeconfig context/path selection is supported;
+otherwise client construction tries in-cluster credentials before the current
+kubeconfig context.
+
+After an accepted patch, the store performs a fresh GET, validates the document
+through the normal schema-v2 boundary, checks that the UID is unchanged and that
+the typed state equals the intended state, and returns the new `resourceVersion`.
+An unobservable or contradictory result fails closed. State persistence and Lease
+ownership remain separate concerns; Lease ownership is not implemented in Slice 2B.
 
 ## Security and deployment limits
 
@@ -169,7 +189,7 @@ against debugger/core dumps. No credential hashes are emitted. Safe errors do no
 include raw parser/subprocess messages. Metadata names and configured location IDs
 remain visible in reports and are operationally sensitive.
 
-There is intentionally no dependency on the Kubernetes Python SDK yet. The only
-runtime third-party dependency is PyYAML. The subprocess runner is injectable, and
-its exact read-only command is tested. An SDK implementation can be added behind
-the same reader protocol later; it must retain the same validation/error boundary.
+Slice 1 planning still uses its constrained, read-only kubectl adapter. Slice 2B
+state persistence instead depends on the Kubernetes Python client and never invokes
+kubectl: the narrow API transport is tested independently from the behavioral fake
+that exercises store semantics. Lease ownership remains a separate Slice 2C concern.
