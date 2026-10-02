@@ -89,6 +89,28 @@ def perform_mutation(client: HttpKeystoneClient, mutation: MutationKind) -> None
         )
 
 
+def behavioral_fake() -> FakeKeystoneClient:
+    fake = FakeKeystoneClient(
+        project_id="admin-project", project_name="admin-project-name",
+        project_domain_id="default-domain",
+    )
+    fake.add_user(
+        KeystoneUserObservation(
+            "admin-user", "admin", "default-domain", True, "admin-project", False,
+        ),
+        SecretValue(b"old-password"),
+    )
+    return fake
+
+
+def fake_authenticate(
+    fake: FakeKeystoneClient, password: bytes,
+) -> KeystoneAuthSuccess | KeystoneAuthRejected | KeystoneAuthIndeterminate:
+    return fake.authenticate_password(KeystonePasswordAuthRequest(
+        "admin", "default-domain", "admin-project", SecretValue(password),
+    ))
+
+
 def test_password_auth_success_exposes_identity_scope_and_roles() -> None:
     transport = FakeHttpTransport()
     transport.queue_response(response(201, auth_document(), token=TOKEN))
@@ -342,23 +364,12 @@ def test_mutation_transport_failure_is_ambiguous_and_secret_safe(
 
 
 def test_behavioral_fake_changes_accepted_password_and_lockout_option() -> None:
-    fake = FakeKeystoneClient(
-        project_id="admin-project", project_name="admin-project-name",
-        project_domain_id="default-domain",
-    )
-    fake.add_user(
-        KeystoneUserObservation(
-            "admin-user", "admin", "default-domain", True, "admin-project", False,
-        ),
-        SecretValue(b"old-password"),
-    )
+    fake = behavioral_fake()
     fake.set_user_password(
         user_id="admin-user", new_password=SecretValue(b"new-password"),
         management_token=MANAGEMENT_TOKEN,
     )
-    result = fake.authenticate_password(KeystonePasswordAuthRequest(
-        "admin", "default-domain", "admin-project", SecretValue(b"new-password"),
-    ))
+    result = fake_authenticate(fake, b"new-password")
     assert isinstance(result, KeystoneAuthSuccess)
     fake.set_ignore_lockout_failure_attempts(
         user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
@@ -368,27 +379,9 @@ def test_behavioral_fake_changes_accepted_password_and_lockout_option() -> None:
     ).ignore_lockout_failure_attempts is True
 
 
-@pytest.mark.parametrize(
-    "kind",
-    [
-        ExternalErrorCode.AUTHORIZATION_FAILURE,
-        ExternalErrorCode.MUTATION_AMBIGUOUS,
-    ],
-)
-def test_behavioral_fake_supports_typed_mutation_failures(
-    kind: ExternalErrorCode,
-) -> None:
-    fake = FakeKeystoneClient(
-        project_id="admin-project", project_name="admin-project-name",
-        project_domain_id="default-domain",
-    )
-    fake.add_user(
-        KeystoneUserObservation(
-            "admin-user", "admin", "default-domain", True, "admin-project", False,
-        ),
-        SecretValue(b"old-password"),
-    )
-    fake.next_mutation_error = kind
+def test_behavioral_fake_supports_definite_mutation_failure() -> None:
+    fake = behavioral_fake()
+    fake.next_mutation_error = ExternalErrorCode.AUTHORIZATION_FAILURE
 
     with pytest.raises(ExternalClientError) as raised:
         fake.set_user_password(
@@ -396,4 +389,101 @@ def test_behavioral_fake_supports_typed_mutation_failures(
             management_token=MANAGEMENT_TOKEN,
         )
 
-    assert raised.value.kind is kind
+    assert raised.value.kind is ExternalErrorCode.AUTHORIZATION_FAILURE
+    assert isinstance(fake_authenticate(fake, b"old-password"), KeystoneAuthSuccess)
+
+
+@pytest.mark.parametrize(
+    ("apply", "accepted_password", "rejected_password"),
+    [
+        (True, b"new-password", b"old-password"),
+        (False, b"old-password", b"new-password"),
+    ],
+)
+def test_behavioral_fake_password_ambiguity_models_applied_and_not_applied(
+    apply: bool, accepted_password: bytes, rejected_password: bytes,
+) -> None:
+    fake = behavioral_fake()
+    fake.ambiguous_next_password_update_apply = apply
+
+    with pytest.raises(ExternalClientError) as raised:
+        fake.set_user_password(
+            user_id="admin-user", new_password=SecretValue(b"new-password"),
+            management_token=MANAGEMENT_TOKEN,
+        )
+
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
+    assert isinstance(
+        fake_authenticate(fake, accepted_password), KeystoneAuthSuccess,
+    )
+    assert isinstance(
+        fake_authenticate(fake, rejected_password), KeystoneAuthRejected,
+    )
+
+
+@pytest.mark.parametrize(("apply", "expected_value"), [(True, True), (False, False)])
+def test_behavioral_fake_lockout_ambiguity_models_applied_and_not_applied(
+    apply: bool, expected_value: bool,
+) -> None:
+    fake = behavioral_fake()
+    fake.ambiguous_next_lockout_update_apply = apply
+
+    with pytest.raises(ExternalClientError) as raised:
+        fake.set_ignore_lockout_failure_attempts(
+            user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
+        )
+
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
+    observed = fake.get_user(
+        user_id="admin-user", management_token=MANAGEMENT_TOKEN,
+    )
+    assert observed.ignore_lockout_failure_attempts is expected_value
+
+    fake.set_ignore_lockout_failure_attempts(
+        user_id="admin-user", value=not expected_value,
+        management_token=MANAGEMENT_TOKEN,
+    )
+    observed = fake.get_user(
+        user_id="admin-user", management_token=MANAGEMENT_TOKEN,
+    )
+    assert observed.ignore_lockout_failure_attempts is not expected_value
+
+
+def test_behavioral_fake_ambiguous_configuration_is_one_shot() -> None:
+    fake = behavioral_fake()
+    fake.ambiguous_next_password_update_apply = False
+    with pytest.raises(ExternalClientError) as raised:
+        fake.set_user_password(
+            user_id="admin-user", new_password=SecretValue(b"new-password"),
+            management_token=MANAGEMENT_TOKEN,
+        )
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
+
+    fake.set_user_password(
+        user_id="admin-user", new_password=SecretValue(b"new-password"),
+        management_token=MANAGEMENT_TOKEN,
+    )
+    assert isinstance(fake_authenticate(fake, b"new-password"), KeystoneAuthSuccess)
+
+
+def test_behavioral_fake_rejects_conflicting_mutation_configuration() -> None:
+    fake = behavioral_fake()
+    fake.next_mutation_error = ExternalErrorCode.AUTHORIZATION_FAILURE
+    fake.ambiguous_next_password_update_apply = True
+
+    with pytest.raises(ValueError, match="cannot both be configured"):
+        fake.set_user_password(
+            user_id="admin-user", new_password=SecretValue(b"new-password"),
+            management_token=MANAGEMENT_TOKEN,
+        )
+
+
+def test_behavioral_fake_rejects_ambiguous_general_mutation_error() -> None:
+    fake = behavioral_fake()
+    fake.next_mutation_error = ExternalErrorCode.MUTATION_AMBIGUOUS
+
+    with pytest.raises(ValueError, match="mutation-specific ambiguous apply control"):
+        fake.set_user_password(
+            user_id="admin-user", new_password=SecretValue(b"new-password"),
+            management_token=MANAGEMENT_TOKEN,
+        )

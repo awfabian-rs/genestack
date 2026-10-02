@@ -354,6 +354,8 @@ class FakeKeystoneClient:
         self._users: dict[str, _FakeKeystoneUser] = {}
         self.next_auth_indeterminate: KeystoneIndeterminateReason | None = None
         self.next_mutation_error: ExternalErrorCode | None = None
+        self.ambiguous_next_password_update_apply: bool | None = None
+        self.ambiguous_next_lockout_update_apply: bool | None = None
 
     def add_user(self, observation: KeystoneUserObservation, password: SecretValue) -> None:
         self._users[observation.user_id] = _FakeKeystoneUser(observation, password)
@@ -386,6 +388,18 @@ class FakeKeystoneClient:
         return KeystoneAuthSuccess(observation, SecretValue(b"FAKE_REDACTED_TOKEN"))
 
     def _maybe_fail_mutation(self) -> None:
+        if self.next_mutation_error is ExternalErrorCode.MUTATION_AMBIGUOUS:
+            raise ValueError(
+                "Use the mutation-specific ambiguous apply control.",
+            )
+        ambiguous_configured = (
+            self.ambiguous_next_password_update_apply is not None
+            or self.ambiguous_next_lockout_update_apply is not None
+        )
+        if self.next_mutation_error is not None and ambiguous_configured:
+            raise ValueError(
+                "Definite and ambiguous mutation outcomes cannot both be configured.",
+            )
         if self.next_mutation_error is not None:
             kind = self.next_mutation_error
             self.next_mutation_error = None
@@ -396,10 +410,16 @@ class FakeKeystoneClient:
         management_token: SecretValue,
     ) -> None:
         del management_token
+        apply = self.ambiguous_next_password_update_apply
         self._maybe_fail_mutation()
         if user_id not in self._users:
             raise ExternalClientError(ExternalErrorCode.NOT_FOUND)
-        self._users[user_id].password = new_password
+        if apply is not None:
+            self.ambiguous_next_password_update_apply = None
+        if apply is None or apply:
+            self._users[user_id].password = new_password
+        if apply is not None:
+            raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS)
 
     def get_user(
         self, *, user_id: str, management_token: SecretValue,
@@ -413,12 +433,18 @@ class FakeKeystoneClient:
         self, *, user_id: str, value: bool, management_token: SecretValue,
     ) -> None:
         del management_token
+        apply = self.ambiguous_next_lockout_update_apply
         self._maybe_fail_mutation()
         if user_id not in self._users:
             raise ExternalClientError(ExternalErrorCode.NOT_FOUND)
-        current = self._users[user_id]
-        old = current.observation
-        current.observation = KeystoneUserObservation(
-            old.user_id, old.name, old.domain_id, old.enabled,
-            old.default_project_id, value,
-        )
+        if apply is not None:
+            self.ambiguous_next_lockout_update_apply = None
+        if apply is None or apply:
+            current = self._users[user_id]
+            old = current.observation
+            current.observation = KeystoneUserObservation(
+                old.user_id, old.name, old.domain_id, old.enabled,
+                old.default_project_id, value,
+            )
+        if apply is not None:
+            raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS)
