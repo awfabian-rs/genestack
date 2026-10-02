@@ -11,9 +11,10 @@ contract YAML -> validated immutable types -> Secret inventory
 ```
 
 There are no credential writers, rotation commands, restart operations, Lease
-acquisition, transaction-state writes, PasswordSafe requests or Keystone requests.
-The live adapter runs only `kubectl get secrets -o json` in an explicitly named
-context. Offline fixture mode does not invoke kubectl.
+acquisition, PasswordSafe requests or Keystone requests. Slice 2B provides a
+library boundary for conditional transaction-state persistence, but it is not wired
+to the CLI. The live planning adapter runs only `kubectl get secrets -o json` in an
+explicitly named context. Offline fixture mode does not invoke kubectl.
 
 ## Install and run locally
 
@@ -99,8 +100,8 @@ admin-password-rotation plan \
 context. An optional `--kubeconfig /path/to/config` selects a specific file. No
 TLS bypass flags are added. The adapter captures raw subprocess output and does
 not echo it on failure. Kubeconfig authentication plugins can themselves execute
-local code or refresh credentials: the no-mutation claim concerns rotation and
-Kubernetes resource writes, not all behavior of an external authentication plugin.
+local code or refresh credentials: the planning command's no-mutation claim does
+not cover all behavior of an external authentication plugin.
 
 The live adapter uses **kubectl rather than the Python Kubernetes SDK** for this
 bootstrap. This is a bounded implementation choice, not an architectural change:
