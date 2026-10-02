@@ -1,8 +1,13 @@
 # Design of this bootstrap
 
 Status: implemented Slice 1 choices, the Slice 2A typed state boundary, Slice 2B
-Kubernetes persistence for that state, and Slice 2C cooperative Lease ownership;
-rotation behavior remains unimplemented.
+Kubernetes persistence for that state, and Slice 2C cooperative Lease ownership.
+
+Implemented:
+Slices 1, 2A, 2B, 2C, 3A.
+
+No workflow currently invokes credential mutations.
+PREPARE_B and ROTATE_A orchestration remain unimplemented.
 
 ## Boundaries
 

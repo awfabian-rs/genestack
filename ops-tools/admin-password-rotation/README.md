@@ -1,4 +1,4 @@
-# Admin password rotation: read-only bootstrap
+# Genestack Keystone admin password rotation
 
 First draft of the first implementation slice for Genestack. Intended location:
 `ops-tools/admin-password-rotation/`. This is a working topology inspector with
