@@ -1,6 +1,7 @@
 # Design of this bootstrap
 
-Status: implemented first-slice choices, not amendments to the full rotation design.
+Status: implemented Slice 1 choices plus the Slice 2A typed state boundary; later
+rotation behavior remains unimplemented.
 
 ## Boundaries
 
@@ -14,6 +15,7 @@ Status: implemented first-slice choices, not amendments to the full rotation des
 | `discovery.py` | Compare against supplied reference values and audit undeclared known-password copies. |
 | `planning.py` | Pure function over contract and inventory; derive findings and potential dependencies. |
 | `reporting.py` | Explicit allow-listed projection into credential-free text/JSON. |
+| `state.py` | Strict schema-v2 JSON boundary for durable transaction memory. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -115,6 +117,41 @@ Secret UID and resourceVersion are retained as opaque observations. They are not
 ordered or incremented. The inventory is a finite observation, not a lock across
 Kubernetes, PasswordSafe and Keystone. Any future mutating command must acquire
 ownership and reread relevant state; a saved report cannot be applied.
+
+## Durable transaction state
+
+Schema version 2 defines the future contents of
+`Secret/openstack/keystone-admin-rotation-state` at `data/state.json`. This slice
+defines only immutable types and the strict JSON serialization/validation boundary;
+it does not read or write that Secret, acquire a Lease, or perform rotation work.
+
+The state is durable transaction memory, not authority over external reality.
+Recorded progress may lag an effect that completed before the next state update.
+For that reason the model keeps one explicit current credential-mutation intent,
+its observed-effect state, both propagation waves, lockout intent/observations and
+bounded latest verification results. Future executors must follow:
+
+```
+persist intent -> perform effect -> read/verify actual state -> record progress
+```
+
+Each credential-mutation intent names one exact consequential effect rather than a
+broad rotation phase. Runtime-action progress is keyed by the normalized configured
+action ID, including actions such as Pod recreation that are not expressible as a
+Deployment or DaemonSet reference. This accommodates both `rollout_restart` and
+`recreate_pod` obligations without copying action definitions into state. The
+configuration digest binds those IDs to the same effective action definitions on
+resume. Lockout booleans explicitly represent Keystone's
+`ignore_lockout_failure_attempts` option; the normal stable value is `false`, while
+observed abnormal and transitional values remain representable.
+
+The state retains resolved Keystone object IDs so recovery does not silently adopt
+same-name replacements. Generated credential generations are represented only as
+`sha256:<64 lowercase hex>` over their exact UTF-8 bytes. Credential values, old
+credential fingerprints, tokens, raw API responses and free-form diagnostics are
+not fields in the schema. Last errors and verification detail use safe identifier
+codes. Completed-request entries are compact and bounded rather than full historical
+transactions. Retention policy and Kubernetes persistence belong to a later slice.
 
 ## Security and deployment limits
 
