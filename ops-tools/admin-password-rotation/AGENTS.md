@@ -182,6 +182,10 @@ Review the final diff for:
    for exceptional recovery, but its implementation is deferred until
    the A-recovery slice establishes the concrete need. Slice 3A does
    not expose get_exact_history_version().
+2. Exact historical old-A retrieval remains an exceptional recovery
+   requirement, but its implementation is deliberately deferred until
+   the later A-recovery slice demonstrates the concrete need;
+   Slice 3A does not expose get_exact_history_version().
 
 ## Final report
 
