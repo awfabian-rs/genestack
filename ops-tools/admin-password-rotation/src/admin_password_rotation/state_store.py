@@ -7,15 +7,15 @@ from __future__ import annotations
 
 import base64
 import binascii
-import importlib
 import json
 import math
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Protocol, Self, cast, runtime_checkable
+from typing import Protocol, Self, cast, runtime_checkable
 
 from .errors import ReadError, SafeError
+from .kubernetes_api import create_kubernetes_api, validate_api_options
 from .model import PersistentState
 from .state import parse_state_json, serialize_state_json
 from .validation import is_object_name, object_mapping
@@ -179,61 +179,16 @@ class KubernetesApiStateSecretTransport:
         Without either, in-cluster credentials are tried before the current
         kubeconfig context.
         """
-        if context is not None and (
-            not context or context.startswith("-") or any(ord(char) < 32 for char in context)
-        ):
-            raise ReadError("invalid_context", "The kubeconfig context is invalid.")
-        if not math.isfinite(timeout) or not 0 < timeout <= 3600:
-            raise ReadError(
-                "invalid_timeout", "Timeout must be finite, positive, and at most 3600 seconds.",
-            )
+        validate_api_options(context=context, timeout=timeout)
         try:
-            client_module = importlib.import_module("kubernetes.client")
-            config_module = importlib.import_module("kubernetes.config")
-            config_exception_module = importlib.import_module(
-                "kubernetes.config.config_exception",
+            handle = create_kubernetes_api(
+                "CoreV1Api", context=context, kubeconfig=kubeconfig,
             )
-
-            # The generated Kubernetes package has no typing marker. Keep its
-            # dynamic surface local and immediately narrow it to our protocols.
-            api_client_type = cast(
-                Callable[..., object], getattr(client_module, "ApiClient"),
-            )
-            configuration_type = cast(
-                Callable[..., object], getattr(client_module, "Configuration"),
-            )
-            core_v1_type = cast(
-                Callable[..., object], getattr(client_module, "CoreV1Api"),
-            )
-            load_incluster = cast(
-                Callable[..., None], getattr(config_module, "load_incluster_config"),
-            )
-            new_client_from_config = cast(
-                Callable[..., object], getattr(config_module, "new_client_from_config"),
-            )
-            config_exception_type = cast(
-                type[Exception], getattr(config_exception_module, "ConfigException"),
-            )
-
-            if context is not None or kubeconfig is not None:
-                api_client = new_client_from_config(
-                    config_file=None if kubeconfig is None else str(kubeconfig),
-                    context=context,
-                    persist_config=False,
-                )
-            else:
-                configuration = configuration_type()
-                try:
-                    load_incluster(client_configuration=configuration)
-                    api_client = api_client_type(configuration=configuration)
-                except config_exception_type:
-                    api_client = new_client_from_config(persist_config=False)
-            api = core_v1_type(api_client=api_client)
         except Exception:
             raise StateSecretTransportError(StateSecretTransportErrorCode.FAILURE) from None
         return cls(
-            cast(_CoreV1SecretApi, api),
-            cast(_KubernetesSerializer, api_client),
+            cast(_CoreV1SecretApi, handle.api),
+            cast(_KubernetesSerializer, handle.serializer),
             timeout=timeout,
         )
 
