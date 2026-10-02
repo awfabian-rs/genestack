@@ -228,6 +228,7 @@ class FakePasswordSafeClient:
         self._records: dict[tuple[int, int], PasswordSafeCredential] = {}
         self.next_update_error: ExternalErrorCode | None = None
         self.ambiguous_next_update_apply: bool | None = None
+        self.update_calls: list[tuple[int, int]] = []
 
     def add(self, credential: PasswordSafeCredential) -> None:
         key = (credential.project_id, credential.credential_id)
@@ -251,6 +252,7 @@ class FakePasswordSafeClient:
         new_password: SecretValue,
     ) -> None:
         del access
+        self.update_calls.append((project_id, credential_id))
         if self.next_update_error is not None:
             kind = self.next_update_error
             self.next_update_error = None

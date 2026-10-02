@@ -124,6 +124,15 @@ Mutation timeouts or connection failures may have ambiguous outcomes. Do not equ
 
 Use the package's configured Python target and Pyright strict mode.
 
+Use the repository-local virtual environment at `.venv`.
+Do not silently fall back to system Python.
+
+From this package, invoke Python as:
+
+    ./.venv/bin/python
+
+If `.venv` is missing or unusable, stop and report it.
+
 Prefer:
 
 - dataclasses and finite enums for meaningful domain distinctions;
@@ -160,8 +169,8 @@ Make the smallest coherent change required by the current task.
 Before reporting completion, run from this package:
 
 ```bash
-python -m pyright
-python -m pytest -q
+./.venv/bin/python -m pyright
+./.venv/bin/python -m pytest -q
 ./scripts/check.sh
 git diff --check
 ```

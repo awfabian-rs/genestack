@@ -44,11 +44,20 @@ Slice 3A
     PasswordSafe password-only mutation
     secure administrative-password generation
     behavioral Keystone and PasswordSafe fakes
+
+Slice 3B
+    fresh stable-A reconciliation and lockout preflight
+    schema-v2 transaction creation/resumption
+    observed B0/B1/B2 classification and recovery
+    PasswordSafe B staging and exact-user Keystone B reset
+    ambiguity reconciliation without blind mutation retry
 ```
 
-The CLI remains primarily read-only/planning-oriented. The existence of lower-level mutation-capable clients does not mean the rotation workflow is implemented.
+The CLI remains primarily read-only/planning-oriented. PREPARE_B is available as
+a library workflow; the end-to-end rotation command is not implemented.
 
-No production workflow currently performs PREPARE_B or ROTATE_A.
+No production workflow currently performs SWITCH_TO_B, ROTATE_A, or any later
+phase.
 
 ## Read these first
 
@@ -308,69 +317,37 @@ The PasswordSafe fake provides equivalent ambiguous mutation behavior.
 
 Later recovery tests should use normal observation methods to discover which reality occurred.
 
+## Implemented PREPARE_B boundary
+
+`prepare_b.py` implements fresh stable-A validation, transaction creation/resume,
+and B0/B1/B2 recovery. B-new's clear text is never persisted: B0 records its
+SHA-256 generation and intent before staging it, while B1/B2 recover the value
+from current PasswordSafe B. Exact-user Keystone reset uses fresh validated A
+authorization. B2 requires a fresh, correctly-scoped breakglass token with the
+recorded admin role. PasswordSafe B staging is the first PasswordSafe mutation;
+PREPARE_B does not mutate PasswordSafe A or the admin lockout option.
+
+`dispatch_unresolved` distinguishes an intent that may have reached an external
+service from one persisted before dispatch. Recovery reobserves first. A matching
+PasswordSafe value or successful B authentication discovers an applied ambiguous
+write; an unresolved old value blocks without a second generation or blind retry.
+An expired-owner Lease takeover follows the same observation gates.
+
+On success, PREPARE_B records phase `SWITCH_TO_B` and stops. It does not execute
+that phase. Re-entry for the same already-advanced request returns existing
+progress without another B rotation.
+
 ## Next implementation increment
 
-The next intended implementation increment is **Slice 3B**:
+The next workflow increment begins with **SWITCH_TO_B**. It must remain separate
+from PREPARE_B and derive mutations/actions from fresh observations and the
+configured credential-location contract.
 
-```text
-stable-A preflight
-+
-PREPARE_B
-+
-B0 / B1 / B2 recovery
-```
+Later ROTATE_A work must require the real admin lockout-suppression
+operation to be observed active before any A-new breeder staging or
+admin password reset.
 
-Slice 3B should build on the Slice 3A client boundaries rather than modifying them casually.
-
-The intended PREPARE_B behavior from the current implementation brief is approximately:
-
-```text
-verify stable A and normal lockout
-    ->
-perform safe capability checks
-    ->
-read current PasswordSafe B
-    ->
-generate B-new
-    ->
-persist B-new generation identifier
-    ->
-PATCH PasswordSafe B
-    ->
-GET and verify B-new
-    ->
-using authenticated A, reset Keystone B to B-new
-    ->
-freshly authenticate B-new
-    ->
-verify expected identity/project/admin authorization
-```
-
-The observed recovery states are:
-
-```text
-B0
-    PasswordSafe B still pre-rotation
-    Keystone B not reset by this transaction
-
-B1
-    PasswordSafe B contains intended B-new
-    Keystone B reset absent or not yet verified
-
-B2
-    PasswordSafe B contains intended B-new
-    B-new freshly authenticates with required authorization
-```
-
-Once B-new has been durably staged in PasswordSafe, recovery must retain that generation rather than generate another one casually.
-
-A candidate lost before any durable staging may be regenerated only after observation establishes that no prior ambiguous staging operation can still take effect.
-
-## Slice 3B scope boundary
-
-Slice 3B should not implement later consumer propagation.
-
-Keep out of Slice 3B unless an explicit task says otherwise:
+Keep out unless an explicit task authorizes the corresponding later slice:
 
 ```text
 SWITCH_TO_B Secret propagation
@@ -390,7 +367,9 @@ transaction completion cleanup
 Job/RBAC packaging
 ```
 
-The next slice should establish a freshly prepared, authorized breakglass safety credential while leaving normal managed consumers on A.
+The next slice should propagate the already-prepared breakglass credential
+to the configured switchable consumer locations while leaving A itself
+unchanged.
 
 ## Later rotation direction
 
@@ -511,4 +490,7 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 A suitable next task is:
 
-> Implement Slice 3B only: stable-A preflight and PREPARE_B/B0-B2 recovery using the existing Slice 2 transaction/ownership infrastructure and Slice 3A external clients. Preserve the current external-client contracts. Establish durable intent before consequential credential effects, reobserve ambiguous mutations rather than retrying blindly, keep all managed consumers on A throughout PREPARE_B, and stop after B is freshly authenticated and authorized. Do not implement SWITCH_TO_B, A0-A3 rotation, propagation/actions/probes, or Job/RBAC packaging. Run Pyright, pytest, `./scripts/check.sh`, and `git diff --check`, and report exact results.
+> Implement the SWITCH_TO_B slice only, using the existing typed locations,
+> transaction state and ownership boundary. Reobserve external state, persist
+> exact intents before effects, apply structural consumer changes and required
+> runtime actions, and stop before VERIFY_B. Do not begin A rotation.

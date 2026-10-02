@@ -264,7 +264,9 @@ def _mutation_intent(value: object) -> CredentialMutationIntent:
         raise ReadError("invalid_mutation_intent", "A propagation step requires affected credential locations.")
     if result.step not in _PROPAGATION_STEPS and result.affected_location_ids:
         raise ReadError("invalid_mutation_intent", "Only a propagation step can have affected credential locations.")
-    if result.effect_state is IntentEffectState.UNKNOWN and (
+    if result.effect_state in (
+        IntentEffectState.UNKNOWN, IntentEffectState.DISPATCH_UNRESOLVED,
+    ) and (
         result.effect_observed_at is not None or result.resulting_resource_version is not None
     ):
         raise ReadError("invalid_mutation_intent", "Mutation observation fields do not match the effect state.")

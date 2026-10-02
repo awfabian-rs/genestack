@@ -262,6 +262,7 @@ class CredentialMutationStep(Enum):
 
 class IntentEffectState(Enum):
     UNKNOWN = "effect_unknown"
+    DISPATCH_UNRESOLVED = "dispatch_unresolved"
     OBSERVED = "effect_observed"
 
 
