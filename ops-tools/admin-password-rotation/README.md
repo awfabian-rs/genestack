@@ -1,8 +1,10 @@
-# Admin password rotation: read-only bootstrap
+# Genestack Keystone admin password rotation
 
-First draft of the first implementation slice for Genestack. Intended location:
-`ops-tools/admin-password-rotation/`. This is a working topology inspector with
-synthetic tests, **not a password rotator and not a production approval gate**.
+Staged implementation of the Genestack Keystone administrative
+password-rotation tool. The CLI currently provides topology inspection
+and planning only; lower-level durable state, Lease ownership, and
+external credential mutation clients are implemented but are not yet
+connected to rotation workflow orchestration.
 
 ```
 contract YAML -> validated immutable types -> Secret inventory
@@ -32,7 +34,7 @@ service, so later workflow code must still reobserve and apply recovery gates.
 
 ## Install and run locally
 
-Use Python 3.11 or newer. The validation environment used Python 3.13.5;
+Use Python 3.12 or newer. The validation environment used Python 3.13.5;
 compatibility with other interpreter versions still needs a local/CI run.
 
 ```sh
@@ -50,10 +52,12 @@ The installed console command `admin-password-rotation` is equivalent to
 `python -m admin_password_rotation`. No root-level Genestack files need changing.
 The complete local check entry point is `./scripts/check.sh`.
 
-**Validation status:** pytest and installation/CLI smoke tests were executed.
-Pyright strict is configured but was **not executed** in the bootstrap environment:
-Pyright was unavailable and network/package downloads were blocked. Run it locally
-before treating this as type-checked. See `docs/VALIDATION.md` for exact results.
+The complete local validation entry point is:
+
+    ./scripts/check.sh
+
+It runs the project's current Pyright, pytest, contract-validation, and
+planning smoke checks.
 
 ## Start without a cluster
 
@@ -175,8 +179,9 @@ planning must close or explicitly account for these gaps.
 
 ## Repository orientation
 
-`src/admin_password_rotation/` contains the small typed application. `tests/`
-contains the executable behavior contract. Start the next coding-agent session
-with `AGENTS.md` and `docs/HANDOFF.md`. `docs/DESIGN.md` records bootstrap choices
-and limitations; `docs/SOURCE-NOTES.md` separates source requirements from those
-choices. `docs/VALIDATION.md` records what was actually tested.
+`src/admin_password_rotation/` contains the typed application and
+supporting libraries. `tests/` contains the executable behavior
+contract. Start coding-agent work with `AGENTS.md` and
+`docs/HANDOFF.md`. `docs/DESIGN.md` describes the architecture currently
+implemented, while `docs/reference/README.md` explains the authority and
+status of the retained design references.

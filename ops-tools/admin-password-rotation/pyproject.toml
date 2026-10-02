@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "genestack-admin-password-rotation"
 version = "0.1.0"
-description = "Read-only credential topology planning for Genestack"
+description = "Genestack Keystone administrative password rotation"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = ["httpx>=0.28,<1", "kubernetes>=36.0.3,<37", "PyYAML>=6.0.2,<7"]
 
 [project.optional-dependencies]
@@ -26,7 +26,7 @@ admin_password_rotation = ["py.typed"]
 include = ["src", "tests"]
 extraPaths = ["src"]
 typeCheckingMode = "strict"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

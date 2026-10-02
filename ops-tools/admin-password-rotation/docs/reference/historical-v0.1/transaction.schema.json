@@ -1,0 +1,1612 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:genestack:keystone-admin-rotation:state:1",
+  "title": "Keystone admin rotation persistent state v1",
+  "$ref": "#/$defs/State",
+  "$defs": {
+    "Phase": {
+      "type": "string",
+      "enum": [
+        "PREPARE_B",
+        "SWITCH_TO_B",
+        "VERIFY_B",
+        "ROTATE_A",
+        "SWITCH_TO_A",
+        "VERIFY_A",
+        "STABLE_A"
+      ]
+    },
+    "Generation": {
+      "type": "string",
+      "enum": [
+        "admin_old",
+        "admin_new",
+        "breakglass"
+      ]
+    },
+    "Wave": {
+      "type": "string",
+      "enum": [
+        "to_b",
+        "to_a"
+      ]
+    },
+    "Cluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kube_system_namespace_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "openstack_namespace_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "kube_system_namespace_uid",
+        "openstack_namespace_uid"
+      ]
+    },
+    "Identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "username": {
+          "type": "string",
+          "enum": [
+            "admin",
+            "breakglass"
+          ]
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "domain_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "username",
+        "user_id",
+        "domain_id"
+      ]
+    },
+    "Identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "admin": {
+          "$ref": "#/$defs/Identity"
+        },
+        "breakglass": {
+          "$ref": "#/$defs/Identity"
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "project_domain_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "required_role_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "admin",
+        "breakglass",
+        "project_id",
+        "project_domain_id",
+        "required_role_ids"
+      ]
+    },
+    "Generations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "admin_old": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "admin_new": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "breakglass": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "stage_attempt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "breeder_staged": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "admin_old",
+        "admin_new",
+        "breakglass",
+        "stage_attempt",
+        "breeder_staged"
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "operator_required": {
+          "type": "boolean"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "operator_required",
+        "at",
+        "operation_id"
+      ]
+    },
+    "Execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pod_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "pod_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "node_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "job_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "acquired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release_quiescent": {
+          "type": "boolean"
+        },
+        "prior_owner_settlement": {
+          "type": "string",
+          "enum": [
+            "initial",
+            "clean_release",
+            "terminated_and_settled",
+            "operator_attested"
+          ]
+        },
+        "settlement_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SettlementEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "execution_id",
+        "epoch",
+        "pod_name",
+        "pod_uid",
+        "node_name",
+        "job_uid",
+        "acquired_at",
+        "released_at",
+        "release_quiescent",
+        "prior_owner_settlement",
+        "settlement_evidence"
+      ]
+    },
+    "ObjectRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "Secret",
+            "Deployment",
+            "DaemonSet",
+            "Pod"
+          ]
+        },
+        "namespace": {
+          "const": "openstack"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "api_version",
+        "kind",
+        "namespace",
+        "name"
+      ]
+    },
+    "ObjectBaseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "last_resource_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "protected_digest": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        }
+      },
+      "required": [
+        "object",
+        "uid",
+        "last_resource_version",
+        "protected_digest"
+      ]
+    },
+    "Location": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "initial_generation": {
+          "$ref": "#/$defs/Generation"
+        },
+        "observed_generation": {
+          "$ref": "#/$defs/Generation"
+        },
+        "observed_fingerprint": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "last_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "object_key",
+        "initial_generation",
+        "observed_generation",
+        "observed_fingerprint",
+        "last_operation_id",
+        "last_observed_at"
+      ]
+    },
+    "Lockout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "initial_value": {
+          "type": "string",
+          "enum": [
+            "absent",
+            "false"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "suppress_intent",
+            "suppressed",
+            "restore_intent",
+            "restored"
+          ]
+        },
+        "suppression_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restoration_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ever_observed_suppressed": {
+          "type": "boolean"
+        },
+        "last_observed_value": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_observed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restore_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "user_id",
+        "initial_value",
+        "state",
+        "suppression_operation_id",
+        "restoration_operation_id",
+        "ever_observed_suppressed",
+        "last_observed_value",
+        "last_observed_at",
+        "restore_required"
+      ]
+    },
+    "Verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "authority",
+            "identity",
+            "topology",
+            "runtime",
+            "credential_effect",
+            "functional",
+            "lockout",
+            "completion"
+          ]
+        },
+        "wave": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Wave"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "covers_actions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+          },
+          "maxItems": 64
+        },
+        "object_uids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "maxItems": 256
+        },
+        "evidence_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        }
+      },
+      "required": [
+        "check_id",
+        "purpose",
+        "wave",
+        "status",
+        "observed_at",
+        "execution_id",
+        "epoch",
+        "covers_actions",
+        "object_uids",
+        "evidence_digest",
+        "code"
+      ]
+    },
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "wave": {
+          "$ref": "#/$defs/Wave"
+        },
+        "token": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maxItems": 256
+        },
+        "location_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+          },
+          "maxItems": 256
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applied",
+            "verified"
+          ]
+        },
+        "target_uid_before": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_uid_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation_after": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "desired_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_verified_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action_id",
+        "wave",
+        "token",
+        "causes",
+        "location_ids",
+        "status",
+        "target_uid_before",
+        "target_uid_after",
+        "generation_after",
+        "desired_count",
+        "last_operation_id",
+        "last_verified_at"
+      ]
+    },
+    "CredentialChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "location_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "before": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "after": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        }
+      },
+      "required": [
+        "location_id",
+        "before",
+        "after"
+      ]
+    },
+    "PatchSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "patch_secret"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "resource_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "protected_digest": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CredentialChange"
+          },
+          "maxItems": 64
+        },
+        "wave": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Wave"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "breeder_stage": {
+          "type": "boolean"
+        },
+        "stage_attempt": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "kind",
+        "object",
+        "uid",
+        "resource_version",
+        "protected_digest",
+        "changes",
+        "wave",
+        "breeder_stage",
+        "stage_attempt",
+        "action_ids"
+      ]
+    },
+    "PatchKeystonePassword": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "patch_keystone_password"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "before": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "after": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "protected_user_digest": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        }
+      },
+      "required": [
+        "kind",
+        "user_id",
+        "before",
+        "after",
+        "protected_user_digest"
+      ]
+    },
+    "PatchLockout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "patch_lockout"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "before": {
+          "type": "boolean"
+        },
+        "after": {
+          "type": "boolean"
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "capability",
+            "suppress",
+            "restore"
+          ]
+        },
+        "protected_user_digest": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        }
+      },
+      "required": [
+        "kind",
+        "user_id",
+        "before",
+        "after",
+        "purpose",
+        "protected_user_digest"
+      ]
+    },
+    "PatchPasswordSafe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "patch_passwordsafe"
+        },
+        "project_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "credential_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "before_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "before": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "after": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "capability",
+            "rotate"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "project_id",
+        "credential_id",
+        "before_version",
+        "before",
+        "after",
+        "purpose"
+      ]
+    },
+    "Rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "rollout_restart"
+        },
+        "action_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "wave": {
+          "$ref": "#/$defs/Wave"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "resource_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "protected_digest": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "token": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "desired_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "kind",
+        "action_id",
+        "wave",
+        "object",
+        "uid",
+        "resource_version",
+        "protected_digest",
+        "token",
+        "desired_count"
+      ]
+    },
+    "DeletePod": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "delete_pod"
+        },
+        "action_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "wave": {
+          "$ref": "#/$defs/Wave"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "resource_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "token": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "kind",
+        "action_id",
+        "wave",
+        "object",
+        "uid",
+        "resource_version",
+        "token"
+      ]
+    },
+    "CreatePod": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "create_pod"
+        },
+        "action_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "wave": {
+          "$ref": "#/$defs/Wave"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "token": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "kind",
+        "action_id",
+        "wave",
+        "object",
+        "manifest_sha256",
+        "token"
+      ]
+    },
+    "CleanupAnnotations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "cleanup_annotations"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "resource_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "annotation_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "maxItems": 32
+        },
+        "expected_annotations_digest": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        }
+      },
+      "required": [
+        "kind",
+        "object",
+        "uid",
+        "resource_version",
+        "annotation_keys",
+        "expected_annotations_digest"
+      ]
+    },
+    "OperationPayload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PatchSecret"
+        },
+        {
+          "$ref": "#/$defs/PatchKeystonePassword"
+        },
+        {
+          "$ref": "#/$defs/PatchLockout"
+        },
+        {
+          "$ref": "#/$defs/PatchPasswordSafe"
+        },
+        {
+          "$ref": "#/$defs/Rollout"
+        },
+        {
+          "$ref": "#/$defs/DeletePod"
+        },
+        {
+          "$ref": "#/$defs/CreatePod"
+        },
+        {
+          "$ref": "#/$defs/CleanupAnnotations"
+        }
+      ]
+    },
+    "Operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "intended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "payload": {
+          "$ref": "#/$defs/OperationPayload"
+        },
+        "observation": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applied",
+            "not_applied",
+            "conflict"
+          ]
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_uid": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_resource_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "sequence",
+        "phase",
+        "execution_id",
+        "epoch",
+        "intended_at",
+        "payload",
+        "observation",
+        "observed_at",
+        "observed_uid",
+        "observed_resource_version",
+        "observed_version",
+        "request_id",
+        "error"
+      ]
+    },
+    "PasswordSafeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "credential_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "project_id",
+        "credential_id",
+        "version",
+        "fingerprint",
+        "observed_at"
+      ]
+    },
+    "Completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "credential_rotation_succeeded": {
+          "type": "boolean"
+        },
+        "authority_converged": {
+          "type": "boolean"
+        },
+        "runtime_verified": {
+          "type": "boolean"
+        },
+        "lockout_restored": {
+          "type": "boolean"
+        },
+        "final_audit_passed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup_state": {
+          "type": "string",
+          "enum": [
+            "not_started",
+            "intent",
+            "done"
+          ]
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "credential_rotation_succeeded",
+        "authority_converged",
+        "runtime_verified",
+        "lockout_restored",
+        "final_audit_passed_at",
+        "cleanup_state",
+        "completed_at"
+      ]
+    },
+    "Transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transaction_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "blocked",
+            "completed"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "program_image_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "fingerprint_key_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "fingerprint_key_secret_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "identities": {
+          "$ref": "#/$defs/Identities"
+        },
+        "generations": {
+          "$ref": "#/$defs/Generations"
+        },
+        "executions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Execution"
+          },
+          "maxItems": 128
+        },
+        "owner_execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "owner_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "objects": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ObjectBaseline"
+          },
+          "maxProperties": 256
+        },
+        "locations": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Location"
+          },
+          "maxProperties": 256
+        },
+        "actions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Action"
+          },
+          "maxProperties": 256
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Operation"
+          },
+          "maxItems": 512
+        },
+        "lockout": {
+          "$ref": "#/$defs/Lockout"
+        },
+        "passwordsafe_admin": {
+          "$ref": "#/$defs/PasswordSafeObservation"
+        },
+        "passwordsafe_breakglass": {
+          "$ref": "#/$defs/PasswordSafeObservation"
+        },
+        "verifications": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Verification"
+          },
+          "maxItems": 256
+        },
+        "completion": {
+          "$ref": "#/$defs/Completion"
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "transaction_id",
+        "request_id",
+        "status",
+        "phase",
+        "created_at",
+        "updated_at",
+        "config_sha256",
+        "program_image_digest",
+        "fingerprint_key_id",
+        "fingerprint_key_secret_uid",
+        "identities",
+        "generations",
+        "executions",
+        "owner_execution_id",
+        "owner_epoch",
+        "objects",
+        "locations",
+        "actions",
+        "operations",
+        "lockout",
+        "passwordsafe_admin",
+        "passwordsafe_breakglass",
+        "verifications",
+        "completion",
+        "last_error"
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transaction_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "fingerprint_key_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "admin_new": {
+          "type": "string",
+          "pattern": "^hmac-sha256:v1:[a-z0-9_.-]{1,64}:[A-Za-z0-9_-]{43}$"
+        },
+        "final_audit_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "lockout_restored": {
+          "const": true
+        },
+        "cleanup_complete": {
+          "const": true
+        }
+      },
+      "required": [
+        "transaction_id",
+        "request_id",
+        "completed_at",
+        "config_sha256",
+        "fingerprint_key_id",
+        "admin_new",
+        "final_audit_sha256",
+        "lockout_restored",
+        "cleanup_complete"
+      ]
+    },
+    "State": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "environment_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+        },
+        "cluster": {
+          "$ref": "#/$defs/Cluster"
+        },
+        "lease_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Transaction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Receipt"
+          },
+          "maxItems": 12
+        }
+      },
+      "required": [
+        "schema_version",
+        "environment_id",
+        "cluster",
+        "lease_uid",
+        "revision",
+        "current",
+        "completed"
+      ]
+    },
+    "SettlementEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "reference",
+        "sha256"
+      ]
+    }
+  }
+}

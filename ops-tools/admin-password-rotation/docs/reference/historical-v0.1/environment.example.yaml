@@ -1,0 +1,277 @@
+# NOT DEPLOYABLE AS WRITTEN. REQUIRED placeholders intentionally block validation.
+# Probe paths/programs are environment inputs, not established service probes.
+schema_version: 1
+environment_id: REQUIRED_ENVIRONMENT_ID
+namespace: openstack
+contract: credential-contract.baseline.yaml
+keystone:
+  v3_base_url: https://REQUIRED_KEYSTONE_HOST/v3
+  ca_file: /etc/rotation/ca/keystone.pem
+  region: REQUIRED_REGION
+  admin_username: admin
+  breakglass_username: breakglass
+  user_domain_name: default
+  project_name: admin
+  project_domain_name: default
+  management_scope:
+    type: project
+    project_name: admin
+    project_domain_name: default
+  required_project_roles:
+  - admin
+  required_management_roles:
+  - REQUIRED_MANAGEMENT_ROLE
+passwordsafe:
+  base_url: https://REQUIRED_PASSWORDSAFE_HOST
+  identity_token_url: https://identity-internal.api.rackspacecloud.com/v2.0/tokens
+  identity_domain: Rackspace
+  ca_file: /etc/rotation/ca/passwordsafe.pem
+  identity_ca_file: /etc/rotation/ca/identity-internal.pem
+  service_account_username_file: /etc/rotation/auth/username
+  service_account_password_file: /etc/rotation/auth/password
+  admin:
+    project_id: REQUIRED_INTEGER
+    credential_id: REQUIRED_INTEGER
+  breakglass:
+    project_id: REQUIRED_INTEGER
+    credential_id: REQUIRED_INTEGER
+state:
+  secret_name: keystone-admin-rotation-state
+  lease_name: keystone-admin-rotation
+  fingerprint_key_secret_name: keystone-admin-rotation-fingerprint-key
+  fingerprint_key_secret_uid: REQUIRED_SECRET_UID
+  fingerprint_key_id: REQUIRED_KEY_ID
+  fingerprint_key_sha256: sha256:REQUIRED_64_HEX_DIGEST
+  fingerprint_key_file: /etc/rotation/key/key
+execution:
+  program_image_digest: sha256:REQUIRED_64_HEX_DIGEST
+  pod_name_env: POD_NAME
+  pod_uid_env: POD_UID
+  node_name_env: NODE_NAME
+  namespace_env: POD_NAMESPACE
+ownership:
+  lease_duration_seconds: 120
+  renew_interval_seconds: 20
+  renew_deadline_seconds: 60
+  expiry_margin_seconds: 15
+  external_mutation_settlement:
+    mode: operator_assisted
+    maximum_completion_seconds: null
+    evidence_reference: REQUIRED_SETTLEMENT_RUNBOOK_REFERENCE
+timeouts:
+  api_connect_seconds: 5
+  api_total_seconds: 30
+  read_attempts: 3
+  cas_attempts: 3
+  poll_seconds: 5
+  lease_wait_seconds: 180
+  rollout_seconds: 600
+  pod_delete_seconds: 120
+  pod_ready_seconds: 300
+  probe_seconds: 60
+  verification_freshness_seconds: 60
+  capability_freshness_seconds: 300
+  execution_seconds: 7200
+safety:
+  discovery_evidence: REQUIRED_ENVIRONMENT_DISCOVERY_REFERENCE
+  external_consumer_evidence: REQUIRED_EXTERNAL_CONSUMER_INVENTORY_REFERENCE
+  writer_exclusion_evidence: REQUIRED_CHANGE_EXCLUSION_REFERENCE
+  fixed_admin_nonruntime_locations:
+  - location: keystone-admin
+    evidence_reference: REQUIRED_DIRECT_BREEDER_CONSUMER_EVIDENCE
+  - location: ceilometer-keystone-admin-password
+    evidence_reference: REQUIRED_FIXED_ADMIN_CONSUMER_EVIDENCE
+  non_keystone_classifications: []
+probes:
+- id: neutron-cleanup-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - neutron-cleanup
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_NEUTRON_CLEANUP
+    program_file: /etc/rotation/probes/REQUIRED_neutron-cleanup_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: octavia-api-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - octavia-api
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_OCTAVIA_API
+    program_file: /etc/rotation/probes/REQUIRED_octavia-api_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: octavia-housekeeping-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - octavia-housekeeping
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_OCTAVIA_HOUSEKEEPING
+    program_file: /etc/rotation/probes/REQUIRED_octavia-housekeeping_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: octavia-worker-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - octavia-worker
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_OCTAVIA_WORKER
+    program_file: /etc/rotation/probes/REQUIRED_octavia-worker_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: octavia-health-manager-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - octavia-health-manager
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_OCTAVIA_HEALTH_MANAGER
+    program_file: /etc/rotation/probes/REQUIRED_octavia-health-manager_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: blazar-api-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - blazar-api
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_BLAZAR_API
+    program_file: /etc/rotation/probes/REQUIRED_blazar-api_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: blazar-manager-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - blazar-manager
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_BLAZAR_MANAGER
+    program_file: /etc/rotation/probes/REQUIRED_blazar-manager_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: os-metrics-credential-effect
+  purpose: credential_effect
+  covers_actions:
+  - os-metrics
+  timeout_seconds: 60
+  adapter:
+    type: pod_exec
+    container: REQUIRED_CONTAINER_OS_METRICS
+    program_file: /etc/rotation/probes/REQUIRED_os-metrics_credential_probe.py
+    argv:
+    - python3
+    - -c
+    - '{program}'
+    - '{challenge}'
+    required_checks:
+    - credential_source_read
+- id: neutron-functional
+  purpose: functional
+  covers_actions:
+  - neutron-cleanup
+  timeout_seconds: 60
+  adapter:
+    type: http_get
+    url: https://REQUIRED_NEUTRON_HOST/REQUIRED_CONSUMER_FUNCTIONAL_PATH
+    ca_file: /etc/rotation/ca/REQUIRED_neutron.pem
+    auth: none
+    expected_status: 200
+    assertions:
+    - path:
+      - REQUIRED_FUNCTIONAL_FIELD
+      equals: REQUIRED_EXPECTED_VALUE
+- id: octavia-functional
+  purpose: functional
+  covers_actions:
+  - octavia-api
+  - octavia-housekeeping
+  - octavia-worker
+  - octavia-health-manager
+  timeout_seconds: 60
+  adapter:
+    type: http_get
+    url: https://REQUIRED_OCTAVIA_HOST/REQUIRED_CONSUMER_FUNCTIONAL_PATH
+    ca_file: /etc/rotation/ca/REQUIRED_octavia.pem
+    auth: none
+    expected_status: 200
+    assertions:
+    - path:
+      - REQUIRED_FUNCTIONAL_FIELD
+      equals: REQUIRED_EXPECTED_VALUE
+- id: blazar-functional
+  purpose: functional
+  covers_actions:
+  - blazar-api
+  - blazar-manager
+  timeout_seconds: 60
+  adapter:
+    type: http_get
+    url: https://REQUIRED_BLAZAR_HOST/REQUIRED_CONSUMER_FUNCTIONAL_PATH
+    ca_file: /etc/rotation/ca/REQUIRED_blazar.pem
+    auth: none
+    expected_status: 200
+    assertions:
+    - path:
+      - REQUIRED_FUNCTIONAL_FIELD
+      equals: REQUIRED_EXPECTED_VALUE
+- id: os-metrics-functional
+  purpose: functional
+  covers_actions:
+  - os-metrics
+  timeout_seconds: 60
+  adapter:
+    type: http_get
+    url: https://REQUIRED_OS_METRICS_HOST/REQUIRED_CONSUMER_FUNCTIONAL_PATH
+    ca_file: /etc/rotation/ca/REQUIRED_os-metrics.pem
+    auth: none
+    expected_status: 200
+    assertions:
+    - path:
+      - REQUIRED_FUNCTIONAL_FIELD
+      equals: REQUIRED_EXPECTED_VALUE
