@@ -13,8 +13,9 @@ contract YAML -> validated immutable types -> Secret inventory
 There are no credential writers, rotation commands, restart operations, Lease
 acquisition, PasswordSafe requests or Keystone requests. Slice 2B provides a
 library boundary for conditional transaction-state persistence, but it is not wired
-to the CLI. The live planning adapter runs only `kubectl get secrets -o json` in an
-explicitly named context. Offline fixture mode does not invoke kubectl.
+to the CLI. State persistence uses the Kubernetes Python API directly. The separate
+Slice 1 live planning adapter runs only `kubectl get secrets -o json` in an explicitly
+named context. Offline fixture mode does not invoke kubectl.
 
 ## Install and run locally
 
@@ -104,9 +105,9 @@ local code or refresh credentials: the planning command's no-mutation claim does
 not cover all behavior of an external authentication plugin.
 
 The live adapter uses **kubectl rather than the Python Kubernetes SDK** for this
-bootstrap. This is a bounded implementation choice, not an architectural change:
-`KubernetesReader` returns immutable snapshots, and a later SDK adapter can replace
-it without changing parsing, classification or planning. No SDK is bundled.
+read-only planning path. This is a bounded Slice 1 implementation choice, not the
+state-persistence architecture: `KubernetesReader` returns immutable snapshots,
+while Slice 2B transaction-state persistence uses the Kubernetes Python API client.
 
 A snapshot may also be piped through stdin, avoiding a persistent raw export:
 

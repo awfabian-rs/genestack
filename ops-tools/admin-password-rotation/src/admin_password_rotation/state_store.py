@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib
 import json
 import math
-import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol, Self, cast, runtime_checkable
 
 from .errors import ReadError, SafeError
 from .model import PersistentState
@@ -124,87 +124,140 @@ class StateSecretTransport(Protocol):
     ) -> None: ...
 
 
-@dataclass(frozen=True)
-class StateCommandResult:
-    returncode: int
-    stdout: bytes
+class _CoreV1SecretApi(Protocol):
+    def read_namespaced_secret(
+        self, name: str, namespace: str, **kwargs: object,
+    ) -> object: ...
+
+    def patch_namespaced_secret(
+        self, name: str, namespace: str, body: list[dict[str, str]],
+        **kwargs: object,
+    ) -> object: ...
 
 
-class StateCommandRunner(Protocol):
-    def run(
-        self, argv: tuple[str, ...], timeout: float, stdin: bytes | None,
-    ) -> StateCommandResult: ...
+class _KubernetesSerializer(Protocol):
+    def sanitize_for_serialization(self, value: object) -> object: ...
 
 
-class _CommandTimeout(Exception):
-    pass
+@runtime_checkable
+class _HttpStatusError(Protocol):
+    status: object
 
 
-class _CommandUnavailable(Exception):
-    pass
+def _http_status(error: Exception) -> int | None:
+    if not isinstance(error, _HttpStatusError):
+        return None
+    status = error.status
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
 
 
-class SubprocessStateCommandRunner:
-    """Run only commands assembled by ``KubectlStateSecretTransport``."""
-
-    def run(
-        self, argv: tuple[str, ...], timeout: float, stdin: bytes | None,
-    ) -> StateCommandResult:
-        try:
-            if stdin is None:
-                result = subprocess.run(
-                    argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, timeout=timeout, check=False, shell=False,
-                )
-            else:
-                result = subprocess.run(
-                    argv, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    timeout=timeout, check=False, shell=False,
-                )
-        except subprocess.TimeoutExpired:
-            raise _CommandTimeout from None
-        except OSError:
-            raise _CommandUnavailable from None
-        return StateCommandResult(result.returncode, result.stdout)
-
-
-class KubectlStateSecretTransport:
-    """Narrow kubectl transport for one Secret GET and conditional JSON Patch."""
+class KubernetesApiStateSecretTransport:
+    """Narrow direct-API adapter for one Secret GET and conditional JSON Patch."""
 
     def __init__(
-        self, *, context: str, kubeconfig: Path | None = None,
-        timeout: float = 60.0, runner: StateCommandRunner | None = None,
+        self, api: _CoreV1SecretApi, serializer: _KubernetesSerializer,
+        *, timeout: float = 60.0,
     ) -> None:
-        if not context or context.startswith("-") or any(ord(char) < 32 for char in context):
-            raise ReadError("invalid_context", "An explicit valid kubeconfig context is required.")
         if not math.isfinite(timeout) or not 0 < timeout <= 3600:
-            raise ReadError("invalid_timeout", "Timeout must be finite, positive, and at most 3600 seconds.")
-        self._context = context
-        self._kubeconfig = kubeconfig
+            raise ReadError(
+                "invalid_timeout", "Timeout must be finite, positive, and at most 3600 seconds.",
+            )
+        self._api = api
+        self._serializer = serializer
         self._timeout = timeout
-        self._runner = runner if runner is not None else SubprocessStateCommandRunner()
 
-    def _prefix(self, namespace: str) -> list[str]:
-        argv = ["kubectl", f"--context={self._context}"]
-        if self._kubeconfig is not None:
-            argv.append(f"--kubeconfig={self._kubeconfig}")
-        argv.extend([f"--namespace={namespace}", f"--request-timeout={self._timeout:g}s"])
-        return argv
+    @classmethod
+    def from_config(
+        cls, *, context: str | None = None, kubeconfig: Path | None = None,
+        timeout: float = 60.0,
+    ) -> Self:
+        """Build an isolated API client from in-cluster config or kubeconfig.
+
+        An explicitly supplied context or kubeconfig always selects kubeconfig.
+        Without either, in-cluster credentials are tried before the current
+        kubeconfig context.
+        """
+        if context is not None and (
+            not context or context.startswith("-") or any(ord(char) < 32 for char in context)
+        ):
+            raise ReadError("invalid_context", "The kubeconfig context is invalid.")
+        if not math.isfinite(timeout) or not 0 < timeout <= 3600:
+            raise ReadError(
+                "invalid_timeout", "Timeout must be finite, positive, and at most 3600 seconds.",
+            )
+        try:
+            client_module = importlib.import_module("kubernetes.client")
+            config_module = importlib.import_module("kubernetes.config")
+            config_exception_module = importlib.import_module(
+                "kubernetes.config.config_exception",
+            )
+
+            # The generated Kubernetes package has no typing marker. Keep its
+            # dynamic surface local and immediately narrow it to our protocols.
+            api_client_type = cast(
+                Callable[..., object], getattr(client_module, "ApiClient"),
+            )
+            configuration_type = cast(
+                Callable[..., object], getattr(client_module, "Configuration"),
+            )
+            core_v1_type = cast(
+                Callable[..., object], getattr(client_module, "CoreV1Api"),
+            )
+            load_incluster = cast(
+                Callable[..., None], getattr(config_module, "load_incluster_config"),
+            )
+            new_client_from_config = cast(
+                Callable[..., object], getattr(config_module, "new_client_from_config"),
+            )
+            config_exception_type = cast(
+                type[Exception], getattr(config_exception_module, "ConfigException"),
+            )
+
+            if context is not None or kubeconfig is not None:
+                api_client = new_client_from_config(
+                    config_file=None if kubeconfig is None else str(kubeconfig),
+                    context=context,
+                    persist_config=False,
+                )
+            else:
+                configuration = configuration_type()
+                try:
+                    load_incluster(client_configuration=configuration)
+                    api_client = api_client_type(configuration=configuration)
+                except config_exception_type:
+                    api_client = new_client_from_config(persist_config=False)
+            api = core_v1_type(api_client=api_client)
+        except Exception:
+            raise StateSecretTransportError(StateSecretTransportErrorCode.FAILURE) from None
+        return cls(
+            cast(_CoreV1SecretApi, api),
+            cast(_KubernetesSerializer, api_client),
+            timeout=timeout,
+        )
 
     def read(self, reference: StateSecretReference) -> bytes:
-        argv = self._prefix(reference.namespace)
-        argv.extend([
-            "get", "secret", reference.name, "--output=json", "--ignore-not-found",
-        ])
         try:
-            result = self._runner.run(tuple(argv), self._timeout, None)
-        except (_CommandTimeout, _CommandUnavailable):
+            resource = self._api.read_namespaced_secret(
+                reference.name,
+                reference.namespace,
+                _request_timeout=self._timeout,
+            )
+        except Exception as exc:
+            kind = (
+                StateSecretTransportErrorCode.NOT_FOUND
+                if _http_status(exc) == 404
+                else StateSecretTransportErrorCode.FAILURE
+            )
+            raise StateSecretTransportError(kind) from None
+        try:
+            normalized = self._serializer.sanitize_for_serialization(resource)
+            return json.dumps(
+                normalized, separators=(",", ":"), sort_keys=True,
+            ).encode("utf-8")
+        except Exception:
             raise StateSecretTransportError(StateSecretTransportErrorCode.FAILURE) from None
-        if result.returncode != 0:
-            raise StateSecretTransportError(StateSecretTransportErrorCode.FAILURE)
-        if not result.stdout.strip():
-            raise StateSecretTransportError(StateSecretTransportErrorCode.NOT_FOUND)
-        return result.stdout
 
     def conditional_replace(
         self, expected: StateRevision, *, encoded_state: str,
@@ -219,19 +272,21 @@ class KubectlStateSecretTransport:
             },
             {"op": "replace", "path": f"/data/{STATE_DATA_KEY}", "value": encoded_state},
         ]
-        payload = json.dumps(patch, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        argv = self._prefix(expected.namespace)
-        argv.extend([
-            "patch", "secret", expected.name, "--type=json", "--patch-file=-", "--output=name",
-        ])
         try:
-            result = self._runner.run(tuple(argv), self._timeout, payload)
-        except _CommandTimeout:
-            raise StateSecretTransportError(StateSecretTransportErrorCode.OUTCOME_AMBIGUOUS) from None
-        except _CommandUnavailable:
-            raise StateSecretTransportError(StateSecretTransportErrorCode.FAILURE) from None
-        if result.returncode != 0:
-            raise StateSecretTransportError(StateSecretTransportErrorCode.CONDITIONAL_REJECTED)
+            self._api.patch_namespaced_secret(
+                expected.name,
+                expected.namespace,
+                patch,
+                _content_type="application/json-patch+json",
+                _request_timeout=self._timeout,
+            )
+        except Exception as exc:
+            kind = (
+                StateSecretTransportErrorCode.CONDITIONAL_REJECTED
+                if (_http_status(exc) or 0) > 0
+                else StateSecretTransportErrorCode.OUTCOME_AMBIGUOUS
+            )
+            raise StateSecretTransportError(kind) from None
 
 
 @dataclass(frozen=True)

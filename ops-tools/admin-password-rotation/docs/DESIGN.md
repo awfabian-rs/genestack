@@ -16,7 +16,7 @@ Status: implemented Slice 1 choices, the Slice 2A typed state boundary, and Slic
 | `planning.py` | Pure function over contract and inventory; derive findings and potential dependencies. |
 | `reporting.py` | Explicit allow-listed projection into credential-free text/JSON. |
 | `state.py` | Strict schema-v2 JSON boundary for durable transaction memory. |
-| `state_store.py` | Conditional Kubernetes Secret persistence and read-after-write validation for `state.json`. |
+| `state_store.py` | Conditional Kubernetes API Secret persistence and read-after-write validation for `state.json`. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -158,11 +158,14 @@ transactions. Retention policy belongs to a later slice.
 The persistence observation keeps the Secret namespace, name, UID and
 `resourceVersion` outside the serialized transaction model. UID identifies the
 specific Kubernetes object rather than merely its reusable name. Every update is
-derived from one such observation and uses atomic JSON Patch tests for both UID and
+derived from one such observation. `KubernetesStateStore` uses a narrow direct
+Kubernetes Python API transport to issue atomic JSON Patch tests for both UID and
 `resourceVersion` before replacing only `data/state.json`. A stale update fails;
 future runner logic must discard its stale decision, reobserve, and revalidate
 rather than retry the same document blindly. Unrelated Secret data and metadata are
-not included in the patch.
+not included in the patch. Explicit kubeconfig context/path selection is supported;
+otherwise client construction tries in-cluster credentials before the current
+kubeconfig context.
 
 After an accepted patch, the store performs a fresh GET, validates the document
 through the normal schema-v2 boundary, checks that the UID is unchanged and that
@@ -186,8 +189,7 @@ against debugger/core dumps. No credential hashes are emitted. Safe errors do no
 include raw parser/subprocess messages. Metadata names and configured location IDs
 remain visible in reports and are operationally sensitive.
 
-There is intentionally no dependency on the Kubernetes Python SDK yet. The only
-runtime third-party dependency is PyYAML. The planning reader and narrowly scoped
-state transport use injectable subprocess runners, and their exact commands are
-tested. An SDK implementation can be added behind the same protocols later; it must
-retain the same validation/error boundaries and conditional-write semantics.
+Slice 1 planning still uses its constrained, read-only kubectl adapter. Slice 2B
+state persistence instead depends on the Kubernetes Python client and never invokes
+kubectl: the narrow API transport is tested independently from the behavioral fake
+that exercises store semantics. Lease ownership remains a separate Slice 2C concern.

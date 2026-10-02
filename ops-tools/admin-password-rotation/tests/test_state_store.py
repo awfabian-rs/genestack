@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 
@@ -12,8 +11,8 @@ from admin_password_rotation.model import (
 )
 from admin_password_rotation.state import serialize_state_json
 from admin_password_rotation.state_store import (
-    KubernetesStateStore, KubectlStateSecretTransport, PersistedState, StateCommandResult,
-    StateRevision, StateSecretReference, StateSecretTransportError,
+    KubernetesApiStateSecretTransport, KubernetesStateStore, PersistedState, StateRevision,
+    StateSecretReference, StateSecretTransportError,
     StateSecretTransportErrorCode, StateStoreError, StateStoreErrorCode,
 )
 
@@ -273,65 +272,187 @@ def test_kubernetes_dependency_failure_is_distinct(operation: str) -> None:
     assert raised.value.kind is StateStoreErrorCode.KUBERNETES_FAILURE
 
 
-class RecordingStateRunner:
-    def __init__(self, results: list[StateCommandResult]) -> None:
-        self.results = results
-        self.calls: list[tuple[tuple[str, ...], float, bytes | None]] = []
+def secret_resource(
+    *, uid: str = "state-uid-1", resource_version: str = "10",
+    state: PersistentState | None = None,
+) -> dict[str, object]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "namespace": REFERENCE.namespace,
+            "name": REFERENCE.name,
+            "uid": uid,
+            "resourceVersion": resource_version,
+            "labels": {"managed-by": "installer"},
+            "annotations": {"keep": "unchanged"},
+        },
+        "data": {
+            REFERENCE.data_key: encoded_state(durable_state() if state is None else state),
+            "other-key": "dW5jaGFuZ2Vk",
+        },
+    }
 
-    def run(
-        self, argv: tuple[str, ...], timeout: float, stdin: bytes | None,
-    ) -> StateCommandResult:
-        self.calls.append((argv, timeout, stdin))
-        return self.results.pop(0)
+
+class ApiFailure(Exception):
+    def __init__(self, status: int | None, secret_detail: str = SECRET_SENTINEL) -> None:
+        self.status = status
+        self.reason = secret_detail
+        self.body = secret_detail
+        super().__init__(secret_detail)
 
 
-def test_kubectl_transport_get_is_explicit_and_context_bound() -> None:
-    runner = RecordingStateRunner([StateCommandResult(0, b'{"kind":"Secret"}')])
-    transport = KubectlStateSecretTransport(
-        context="lab;not-a-shell", kubeconfig=Path("/tmp/test config"), timeout=9, runner=runner,
+class IdentityKubernetesSerializer:
+    def sanitize_for_serialization(self, value: object) -> object:
+        return value
+
+
+ReadApiCall = tuple[str, str, dict[str, object]]
+PatchApiCall = tuple[str, str, list[dict[str, str]], dict[str, object]]
+
+
+def no_read_calls() -> list[ReadApiCall]:
+    return []
+
+
+def no_patch_calls() -> list[PatchApiCall]:
+    return []
+
+
+@dataclass
+class RecordingSecretApi:
+    read_results: list[object] = field(default_factory=lambda: [secret_resource()])
+    read_error: Exception | None = None
+    patch_error: Exception | None = None
+    read_calls: list[ReadApiCall] = field(default_factory=no_read_calls)
+    patch_calls: list[PatchApiCall] = field(default_factory=no_patch_calls)
+
+    def read_namespaced_secret(
+        self, name: str, namespace: str, **kwargs: object,
+    ) -> object:
+        self.read_calls.append((name, namespace, kwargs))
+        if self.read_error is not None:
+            raise self.read_error
+        return self.read_results.pop(0)
+
+    def patch_namespaced_secret(
+        self, name: str, namespace: str, body: list[dict[str, str]],
+        **kwargs: object,
+    ) -> object:
+        self.patch_calls.append((name, namespace, body, kwargs))
+        if self.patch_error is not None:
+            raise self.patch_error
+        return secret_resource()
+
+
+def api_transport(
+    api: RecordingSecretApi, *, timeout: float = 60.0,
+) -> KubernetesApiStateSecretTransport:
+    return KubernetesApiStateSecretTransport(
+        api, IdentityKubernetesSerializer(), timeout=timeout,
     )
-    assert transport.read(REFERENCE) == b'{"kind":"Secret"}'
-    assert runner.calls == [((
-        "kubectl", "--context=lab;not-a-shell", "--kubeconfig=/tmp/test config",
-        "--namespace=openstack", "--request-timeout=9s", "get", "secret",
-        "keystone-admin-rotation-state", "--output=json", "--ignore-not-found",
-    ), 9, None)]
 
 
-def test_kubectl_patch_uses_atomic_uid_and_resource_version_tests() -> None:
-    runner = RecordingStateRunner([StateCommandResult(0, b"secret/keystone-admin-rotation-state")])
-    transport = KubectlStateSecretTransport(context="lab", timeout=7, runner=runner)
+def test_api_transport_reads_namespaced_secret_and_returns_json() -> None:
+    resource = secret_resource()
+    api = RecordingSecretApi(read_results=[resource])
+    raw = api_transport(api, timeout=9).read(REFERENCE)
+    assert json.loads(raw) == resource
+    assert api.read_calls == [(
+        "keystone-admin-rotation-state", "openstack", {"_request_timeout": 9},
+    )]
+
+
+def test_api_transport_patch_is_atomic_and_changes_only_state_json() -> None:
+    api = RecordingSecretApi()
+    transport = api_transport(api, timeout=7)
     revision = StateRevision("openstack", "keystone-admin-rotation-state", "uid-1", "10")
     transport.conditional_replace(revision, encoded_state="ZW5jb2RlZA==")
-    argv, timeout, stdin = runner.calls[0]
-    assert argv == (
-        "kubectl", "--context=lab", "--namespace=openstack", "--request-timeout=7s",
-        "patch", "secret", "keystone-admin-rotation-state", "--type=json",
-        "--patch-file=-", "--output=name",
+
+    assert api.patch_calls == [(
+        "keystone-admin-rotation-state",
+        "openstack",
+        [
+            {"op": "test", "path": "/metadata/uid", "value": "uid-1"},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": "10"},
+            {"op": "replace", "path": "/data/state.json", "value": "ZW5jb2RlZA=="},
+        ],
+        {
+            "_content_type": "application/json-patch+json",
+            "_request_timeout": 7,
+        },
+    )]
+    paths = [operation["path"] for operation in api.patch_calls[0][2]]
+    assert paths == ["/metadata/uid", "/metadata/resourceVersion", "/data/state.json"]
+
+
+def test_api_transport_maps_not_found_without_exposing_api_details() -> None:
+    api = RecordingSecretApi(read_error=ApiFailure(404))
+    with pytest.raises(StateSecretTransportError) as raised:
+        api_transport(api).read(REFERENCE)
+    assert raised.value.kind is StateSecretTransportErrorCode.NOT_FOUND
+    assert SECRET_SENTINEL not in str(raised.value) + repr(raised.value)
+
+
+@pytest.mark.parametrize("rejection_status", [409, 422])
+@pytest.mark.parametrize(
+    ("observed", "expected"),
+    [
+        (secret_resource(uid="replacement", resource_version="1"),
+         StateStoreErrorCode.IDENTITY_CHANGED),
+        (secret_resource(resource_version="11"), StateStoreErrorCode.CONFLICT),
+        (secret_resource(), StateStoreErrorCode.KUBERNETES_FAILURE),
+    ],
+)
+def test_api_patch_rejection_is_reobserved_before_classification(
+    observed: dict[str, object], expected: StateStoreErrorCode, rejection_status: int,
+) -> None:
+    api = RecordingSecretApi(
+        read_results=[secret_resource(), observed],
+        patch_error=ApiFailure(rejection_status),
     )
-    assert timeout == 7
-    assert "ZW5jb2RlZA==" not in argv
-    assert stdin is not None
-    assert json.loads(stdin) == [
-        {"op": "test", "path": "/metadata/uid", "value": "uid-1"},
-        {"op": "test", "path": "/metadata/resourceVersion", "value": "10"},
-        {"op": "replace", "path": "/data/state.json", "value": "ZW5jb2RlZA=="},
-    ]
+    store = KubernetesStateStore(REFERENCE, api_transport(api))
+    loaded = store.load()
+    with pytest.raises(StateStoreError) as raised:
+        store.update(loaded.revision, durable_state("intended"))
+    assert raised.value.kind is expected
+    assert len(api.read_calls) == 2
+    assert SECRET_SENTINEL not in str(raised.value) + repr(raised.value)
 
 
-def test_kubectl_not_found_and_failed_patch_are_typed_without_output() -> None:
-    runner = RecordingStateRunner([
-        StateCommandResult(0, b""),
-        StateCommandResult(1, SECRET_SENTINEL.encode()),
-    ])
-    transport = KubectlStateSecretTransport(context="lab", runner=runner)
-    with pytest.raises(StateSecretTransportError) as missing:
-        transport.read(REFERENCE)
-    assert missing.value.kind is StateSecretTransportErrorCode.NOT_FOUND
-    with pytest.raises(StateSecretTransportError) as rejected:
-        transport.conditional_replace(
-            StateRevision("openstack", "keystone-admin-rotation-state", "uid", "1"),
-            encoded_state="e30=",
-        )
-    assert rejected.value.kind is StateSecretTransportErrorCode.CONDITIONAL_REJECTED
-    assert SECRET_SENTINEL not in str(rejected.value) + repr(rejected.value)
+def test_api_secret_payload_validation_error_does_not_expose_content() -> None:
+    resource = secret_resource()
+    resource["data"] = {
+        REFERENCE.data_key: f"not-base64-{SECRET_SENTINEL}",
+    }
+    store = KubernetesStateStore(
+        REFERENCE, api_transport(RecordingSecretApi(read_results=[resource])),
+    )
+    with pytest.raises(StateStoreError) as raised:
+        store.load()
+    assert raised.value.kind is StateStoreErrorCode.STATE_INVALID
+    assert SECRET_SENTINEL not in str(raised.value) + repr(raised.value)
+
+
+def test_api_patch_transport_interruption_is_ambiguous_and_not_retried() -> None:
+    api = RecordingSecretApi(
+        read_results=[secret_resource()],
+        patch_error=TimeoutError(SECRET_SENTINEL),
+    )
+    store = KubernetesStateStore(REFERENCE, api_transport(api))
+    loaded = store.load()
+    with pytest.raises(StateStoreError) as raised:
+        store.update(loaded.revision, durable_state("intended"))
+    assert raised.value.kind is StateStoreErrorCode.WRITE_AMBIGUOUS
+    assert len(api.patch_calls) == 1
+    assert len(api.read_calls) == 1
+    assert SECRET_SENTINEL not in str(raised.value) + repr(raised.value)
+
+
+def test_api_read_dependency_failure_is_secret_safe() -> None:
+    api = RecordingSecretApi(read_error=ApiFailure(500))
+    store = KubernetesStateStore(REFERENCE, api_transport(api))
+    with pytest.raises(StateStoreError) as raised:
+        store.load()
+    assert raised.value.kind is StateStoreErrorCode.KUBERNETES_FAILURE
+    assert SECRET_SENTINEL not in str(raised.value) + repr(raised.value)
