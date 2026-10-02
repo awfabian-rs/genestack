@@ -356,6 +356,8 @@ class FakeKeystoneClient:
         self.next_mutation_error: ExternalErrorCode | None = None
         self.ambiguous_next_password_update_apply: bool | None = None
         self.ambiguous_next_lockout_update_apply: bool | None = None
+        self.password_update_calls: list[str] = []
+        self.lockout_update_calls: list[tuple[str, bool]] = []
 
     def add_user(self, observation: KeystoneUserObservation, password: SecretValue) -> None:
         self._users[observation.user_id] = _FakeKeystoneUser(observation, password)
@@ -410,6 +412,7 @@ class FakeKeystoneClient:
         management_token: SecretValue,
     ) -> None:
         del management_token
+        self.password_update_calls.append(user_id)
         apply = self.ambiguous_next_password_update_apply
         self._maybe_fail_mutation()
         if user_id not in self._users:
@@ -433,6 +436,7 @@ class FakeKeystoneClient:
         self, *, user_id: str, value: bool, management_token: SecretValue,
     ) -> None:
         del management_token
+        self.lockout_update_calls.append((user_id, value))
         apply = self.ambiguous_next_lockout_update_apply
         self._maybe_fail_mutation()
         if user_id not in self._users:

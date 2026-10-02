@@ -1,9 +1,10 @@
 # Design
 
-Status: Slices 1, 2A, 2B, 2C, and 3A are implemented.
+Status: Slices 1, 2A, 2B, 2C, 3A, and 3B are implemented.
 
-- No workflow currently invokes credential mutations.
-- PREPARE_B and ROTATE_A orchestration remain unimplemented.
+- PREPARE_B is implemented as a library workflow and may invoke its narrowly
+  scoped credential/capability mutations.
+- SWITCH_TO_B, ROTATE_A, and all later orchestration remain unimplemented.
 
 ## Boundaries
 
@@ -25,6 +26,7 @@ Status: Slices 1, 2A, 2B, 2C, and 3A are implemented.
 | `keystone.py` | Typed Keystone v3 authentication, exact-user password update and user-option operations. |
 | `passwordsafe.py` | Rackspace Identity authentication and PasswordSafe current-credential read/update operations. |
 | `passwords.py` | Cryptographically secure administrative-password generation. |
+| `prepare_b.py` | Stable-A reconciliation and observed-state PREPARE_B/B0-B2 orchestration. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -260,6 +262,56 @@ source. Passwords and tokens use the existing redacted `SecretValue`; request
 headers/bodies and response content are excluded from representations, and adapter
 errors expose fixed diagnostics rather than raw HTTP content. No password or token
 is persisted by these clients.
+
+## PREPARE_B workflow
+
+Slice 3B adds the first mutation-capable workflow boundary, without wiring it to
+the planning CLI. Before any mutation it rebuilds the topology plan from a fresh
+inventory, structurally reads the breeder, requires PasswordSafe A equality,
+freshly authenticates A, validates the exact user/domain/project/role/expiry, and
+requires the admin user's `ignore_lockout_failure_attempts` value to be `false`.
+Disagreement blocks; it is never resolved by choosing one credential source and
+overwriting another.
+
+After stable A is established, PREPARE_B performs a same-value PasswordSafe A
+capability proof, then classifies B from external observations:
+
+```text
+B0  PasswordSafe B does not contain this transaction's intended generation
+B1  PasswordSafe B contains it, but fresh authorized B authentication is absent
+B2  PasswordSafe B contains it and fresh B authentication proves the recorded
+    breakglass identity, domain, project, required role and valid expiry
+```
+
+The intended B generation is a SHA-256 identifier only. B-new clear text remains
+in memory until it is read back from PasswordSafe. B0 persists the generation and
+`STAGE_B_PASSWORDSAFE` intent before asserting ownership and issuing a password-only
+PATCH. B1 recovers the exact current PasswordSafe value, persists
+`RESET_B_KEYSTONE`, obtains fresh validated A authorization, asserts ownership and
+updates only the recorded breakglass user ID. B2 performs no B password write.
+No old-B fingerprint, PasswordSafe history, rollback, user creation or grant repair
+is involved.
+
+Schema-v2 intent state includes `dispatch_unresolved` to distinguish a durable
+pre-dispatch intent from an operation that may have reached an external service.
+After an ambiguous PasswordSafe B write, a matching read-back advances to B1; an
+old or unobservable value blocks without retrying or inventing B-newer. After an
+ambiguous Keystone reset, fresh successful B authentication advances to B2;
+rejection or indeterminacy blocks and preserves the same staged generation. Resume
+and Lease takeover always repeat fresh stable-A and B observations. The Lease's
+recovery-gate marker does not authorize blind replay.
+
+Every PREPARE_B mutation follows durable intent/dispatch recording, an immediate
+ownership assertion, one non-retried external write, and read-back. The two safe
+capability proofs are PasswordSafe A same-value and, after B2, admin lockout
+`false -> false` using B. Ambiguous same-value writes are accepted only after the
+normal value is freshly observed. Verification results retain bounded timestamps
+and generation identifiers, never credential values.
+
+Completion revalidates stable A, PasswordSafe B and authorized B authentication,
+then records the next phase as `SWITCH_TO_B` and stops. It does not mutate any
+managed consumer, begin propagation, suppress lockout, rotate A, or execute any
+later phase. Re-entering Slice 3B for an already advanced transaction is a no-op.
 
 ## Security and deployment limits
 
