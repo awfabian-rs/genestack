@@ -24,10 +24,13 @@ Before making architectural or workflow changes, read the project design sources
 
 When design sources conflict, use this precedence:
 
-1. the current implementation brief;
-2. the implementation specification where it is not superseded by the brief;
-3. `docs/DESIGN.md` for architecture actually implemented in the code;
-4. `README.md` for user/developer-facing package behavior.
+  When design sources conflict, use this precedence:
+
+1. explicit current-task instructions and post-brief amendments documented here;
+2. the current implementation brief;
+3. the implementation specification where it is not superseded by the brief;
+4. `docs/DESIGN.md` for architecture actually implemented in the code;
+5. `README.md` for user/developer-facing package behavior.
 
 The implementation brief intentionally amends parts of the older implementation specification. Do not resurrect superseded behavior merely because it remains described in the older specification.
 
@@ -182,10 +185,6 @@ Review the final diff for:
    for exceptional recovery, but its implementation is deferred until
    the A-recovery slice establishes the concrete need. Slice 3A does
    not expose get_exact_history_version().
-2. Exact historical old-A retrieval remains an exceptional recovery
-   requirement, but its implementation is deliberately deferred until
-   the later A-recovery slice demonstrates the concrete need;
-   Slice 3A does not expose get_exact_history_version().
 
 ## Final report
 

@@ -9,3 +9,10 @@ keystone-admin-rotation-specification/
     Useful for compatible detail and rationale.
     NOT the current implementation schema where superseded by the brief
     or by already-implemented code.
+
+## Post-brief amendments
+
+- Exact historical old-A PasswordSafe retrieval remains an exceptional
+  recovery requirement, but its implementation is deliberately deferred
+  until the A-recovery slice establishes the concrete need. Slice 3A does
+  not expose `get_exact_history_version()`.

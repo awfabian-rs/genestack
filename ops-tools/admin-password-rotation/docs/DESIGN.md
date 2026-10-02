@@ -1,11 +1,9 @@
-# Design of this bootstrap
+# Design
 
-Status: implemented Slice 1 choices, the Slice 2A typed state boundary, Slice 2B
-Kubernetes persistence for that state, and Slice 2C cooperative Lease ownership.
+Status: Slices 1, 2A, 2B, 2C, and 3A are implemented.
 
-Implemented:
-Slices 1, 2A, 2B, 2C, 3A.
-
+  No workflow currently invokes credential mutations.
+  PREPARE_B and ROTATE_A orchestration remain unimplemented.
 No workflow currently invokes credential mutations.
 PREPARE_B and ROTATE_A orchestration remain unimplemented.
 
@@ -121,10 +119,12 @@ only currently readable matching active/propagated locations. Each workload reta
 all causal locations. Source and fixed-identity locations do not drive that cutover
 list. Empty restart lists remain meaningful.
 
-These are not actual restarts, nor a single deduplicated list for an entire
-A->B->A transaction. The future executor must derive actions from actual changes
-and distinguish the B and A transitions. This slice has no resumed-action receipts,
-action tokens, ownership protocol or transaction journal.
+These are not actual restarts, nor a single deduplicated list for an
+entire A->B->A transaction. The future executor must derive actions from
+actual changes and distinguish the B and A transitions. The Slice 1
+planner has no resumed-action receipts, action tokens, ownership
+protocol or transaction journal; those concerns belong to later
+implementation layers described below.
 
 Secret UID and resourceVersion are retained as opaque observations. They are not
 ordered or incremented. The inventory is a finite observation, not a lock across
