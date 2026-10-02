@@ -52,14 +52,12 @@ class PrepareBErrorCode(Enum):
     ADMIN_USER_MISMATCH = "prepare_b_admin_user_mismatch"
     LOCKOUT_SUPPRESSED = "prepare_b_lockout_suppressed"
     PASSWORDSAFE_ACCESS_EXPIRED = "prepare_b_passwordsafe_access_expired"
-    PASSWORDSAFE_CAPABILITY_FAILED = "prepare_b_passwordsafe_capability_failed"
     PASSWORDSAFE_B_UNRESOLVED = "prepare_b_passwordsafe_b_unresolved"
     PASSWORDSAFE_B_UNKNOWN = "prepare_b_passwordsafe_b_unknown"
     B_AUTH_INDETERMINATE = "prepare_b_b_auth_indeterminate"
     B_IDENTITY_MISMATCH = "prepare_b_b_identity_mismatch"
     B_RESET_UNRESOLVED = "prepare_b_b_reset_unresolved"
     B_RESET_FAILED = "prepare_b_b_reset_failed"
-    LOCKOUT_CAPABILITY_FAILED = "prepare_b_lockout_capability_failed"
     OWNERSHIP_LOST = "prepare_b_ownership_lost"
     EXTERNAL_DEPENDENCY = "prepare_b_external_dependency"
     PASSWORD_GENERATION_FAILED = "prepare_b_password_generation_failed"
@@ -432,70 +430,6 @@ def _assert_owned(ownership: OwnershipGuard) -> None:
         raise PrepareBError(PrepareBErrorCode.OWNERSHIP_LOST) from None
 
 
-def _capability_a(
-    session: _StateSession, stable: _StableA, inputs: PrepareBInputs,
-    passwordsafe: PasswordSafeClient, ownership: OwnershipGuard, now: datetime,
-) -> None:
-    generation = CredentialGeneration.from_secret(stable.password)
-    transaction = _upsert_verification(
-        session.transaction,
-        check_id="passwordsafe-a-capability",
-        status=VerificationStatus.INDETERMINATE,
-        checked_at=now,
-        detail_code="intent-persisted",
-        generation=generation,
-    )
-    session.write(replace(transaction, status=TransactionStatus.ACTIVE, last_error=None))
-    transaction = _upsert_verification(
-        session.transaction,
-        check_id="passwordsafe-a-capability",
-        status=VerificationStatus.INDETERMINATE,
-        checked_at=now,
-        detail_code="dispatch-unresolved",
-        generation=generation,
-    )
-    session.write(transaction)
-    _assert_owned(ownership)
-    ambiguous = False
-    try:
-        passwordsafe.update_password(
-            access=inputs.passwordsafe_access,
-            project_id=inputs.request.passwordsafe_project_id,
-            credential_id=inputs.request.passwordsafe_a_record_id,
-            new_password=stable.password,
-        )
-    except ExternalClientError as exc:
-        if exc.kind is not ExternalErrorCode.MUTATION_AMBIGUOUS:
-            raise PrepareBError(PrepareBErrorCode.PASSWORDSAFE_CAPABILITY_FAILED) from None
-        ambiguous = True
-    try:
-        observed = passwordsafe.get_current(
-            access=inputs.passwordsafe_access,
-            project_id=inputs.request.passwordsafe_project_id,
-            credential_id=inputs.request.passwordsafe_a_record_id,
-            expected_username=inputs.request.admin_username,
-        )
-    except ExternalClientError:
-        raise PrepareBError(PrepareBErrorCode.PASSWORDSAFE_CAPABILITY_FAILED) from None
-    if not _same(observed.password, stable.password):
-        raise PrepareBError(PrepareBErrorCode.PASSWORDSAFE_CAPABILITY_FAILED)
-    detail = "ambiguous-reobserved" if ambiguous else "same-value-verified"
-    transaction = _upsert_verification(
-        session.transaction,
-        check_id="passwordsafe-a-capability",
-        status=VerificationStatus.SUCCESS,
-        checked_at=now,
-        detail_code=detail,
-        generation=generation,
-    )
-    passwordsafe_state = replace(
-        transaction.passwordsafe,
-        observed_a_record_id=observed.credential_id,
-        observed_a_version=observed.version,
-    )
-    session.write(replace(transaction, passwordsafe=passwordsafe_state))
-
-
 def _candidate(
     generator: PasswordGenerator, *, current_a: SecretValue, current_b: SecretValue,
 ) -> SecretValue:
@@ -767,75 +701,6 @@ def _fresh_a_token(
     return result.token
 
 
-def _lockout_capability(
-    session: _StateSession, b_auth: KeystoneAuthSuccess,
-    inputs: PrepareBInputs, keystone: KeystoneClient,
-    ownership: OwnershipGuard, now: datetime,
-) -> None:
-    request = inputs.request
-    try:
-        before = keystone.get_user(
-            user_id=request.keystone.admin_user_id,
-            management_token=b_auth.token,
-        )
-    except ExternalClientError:
-        raise PrepareBError(PrepareBErrorCode.LOCKOUT_CAPABILITY_FAILED) from None
-    _validate_admin_user(before, request)
-    transaction = _upsert_verification(
-        session.transaction,
-        check_id="breakglass-lockout-capability",
-        status=VerificationStatus.INDETERMINATE,
-        checked_at=now,
-        detail_code="intent-persisted",
-        generation=session.transaction.new_b_sha256,
-    )
-    session.write(transaction)
-    transaction = _upsert_verification(
-        session.transaction,
-        check_id="breakglass-lockout-capability",
-        status=VerificationStatus.INDETERMINATE,
-        checked_at=now,
-        detail_code="dispatch-unresolved",
-        generation=session.transaction.new_b_sha256,
-    )
-    session.write(transaction)
-    _assert_owned(ownership)
-    ambiguous = False
-    try:
-        keystone.set_ignore_lockout_failure_attempts(
-            user_id=request.keystone.admin_user_id,
-            value=False,
-            management_token=b_auth.token,
-        )
-    except ExternalClientError as exc:
-        if exc.kind is not ExternalErrorCode.MUTATION_AMBIGUOUS:
-            raise PrepareBError(PrepareBErrorCode.LOCKOUT_CAPABILITY_FAILED) from None
-        ambiguous = True
-    try:
-        after = keystone.get_user(
-            user_id=request.keystone.admin_user_id,
-            management_token=b_auth.token,
-        )
-    except ExternalClientError:
-        raise PrepareBError(PrepareBErrorCode.LOCKOUT_CAPABILITY_FAILED) from None
-    _validate_admin_user(after, request)
-    transaction = _upsert_verification(
-        session.transaction,
-        check_id="breakglass-lockout-capability",
-        status=VerificationStatus.SUCCESS,
-        checked_at=now,
-        detail_code="ambiguous-reobserved" if ambiguous else "false-verified",
-        generation=session.transaction.new_b_sha256,
-    )
-    session.write(replace(
-        transaction,
-        lockout=replace(
-            transaction.lockout,
-            latest_ignore_lockout_failure_attempts=False,
-        ),
-    ))
-
-
 def run_prepare_b(
     inputs: PrepareBInputs, *, state_store: StateStore,
     ownership: OwnershipGuard, passwordsafe: PasswordSafeClient,
@@ -909,8 +774,6 @@ def run_prepare_b(
         )
         session.write(transaction)
 
-        _capability_a(session, stable, inputs, passwordsafe, ownership, now)
-
         # Always use a new current-B read for classification; transaction progress
         # is evidence only and never overrides this observation.
         current_b = passwordsafe.get_current(
@@ -924,8 +787,7 @@ def run_prepare_b(
             session, stable, inputs, passwordsafe, ownership,
             password_generator, now,
         )
-        b_auth = _establish_b2(session, staged, inputs, keystone, ownership, now)
-        _lockout_capability(session, b_auth, inputs, keystone, ownership, now)
+        _establish_b2(session, staged, inputs, keystone, ownership, now)
 
         final_a = _observe_stable_a(inputs, passwordsafe, keystone, now=clock())
         if not _same(final_a.password, stable.password):

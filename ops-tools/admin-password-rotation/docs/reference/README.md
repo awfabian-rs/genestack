@@ -16,3 +16,17 @@ keystone-admin-rotation-specification/
   recovery requirement, but its implementation is deliberately deferred
   until the A-recovery slice establishes the concrete need. Slice 3A does
   not expose `get_exact_history_version()`.
+
+- Separate same-value mutation capability probes are not required.
+  Capability is established by the first real mutation that the workflow
+  actually needs, together with the normal read-after-write or other
+  postcondition verification.
+
+  In PREPARE_B, the first PasswordSafe B staging mutation establishes
+  PasswordSafe write capability. If that mutation fails definitively,
+  PREPARE_B fails while A and all managed consumers remain unchanged.
+
+  Before A rotation, the real admin lockout-suppression mutation must be
+  positively observed as active before breeder staging or admin password
+  mutation is permitted. A separate `false -> false` lockout capability
+  probe is not required.

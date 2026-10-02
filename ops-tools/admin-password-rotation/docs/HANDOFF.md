@@ -50,7 +50,6 @@ Slice 3B
     schema-v2 transaction creation/resumption
     observed B0/B1/B2 classification and recovery
     PasswordSafe B staging and exact-user Keystone B reset
-    PasswordSafe A and B-authorized lockout capability proofs
     ambiguity reconciliation without blind mutation retry
 ```
 
@@ -320,13 +319,13 @@ Later recovery tests should use normal observation methods to discover which rea
 
 ## Implemented PREPARE_B boundary
 
-`prepare_b.py` implements fresh stable-A validation, same-value PasswordSafe A
-capability proof, transaction creation/resume, and B0/B1/B2 recovery. B-new's
-clear text is never persisted: B0 records its SHA-256 generation and intent before
-staging it, while B1/B2 recover the value from current PasswordSafe B. Exact-user
-Keystone reset uses fresh validated A authorization. B2 requires a fresh,
-correctly-scoped breakglass token with the recorded admin role, followed by the
-safe lockout `false -> false` capability proof using B.
+`prepare_b.py` implements fresh stable-A validation, transaction creation/resume,
+and B0/B1/B2 recovery. B-new's clear text is never persisted: B0 records its
+SHA-256 generation and intent before staging it, while B1/B2 recover the value
+from current PasswordSafe B. Exact-user Keystone reset uses fresh validated A
+authorization. B2 requires a fresh, correctly-scoped breakglass token with the
+recorded admin role. PasswordSafe B staging is the first PasswordSafe mutation;
+PREPARE_B does not mutate PasswordSafe A or the admin lockout option.
 
 `dispatch_unresolved` distinguishes an intent that may have reached an external
 service from one persisted before dispatch. Recovery reobserves first. A matching
@@ -343,6 +342,10 @@ progress without another B rotation.
 The next workflow increment begins with **SWITCH_TO_B**. It must remain separate
 from PREPARE_B and derive mutations/actions from fresh observations and the
 configured credential-location contract.
+
+Later ROTATE_A work must require the real admin lockout-suppression
+operation to be observed active before any A-new breeder staging or
+admin password reset.
 
 Keep out unless an explicit task authorizes the corresponding later slice:
 
@@ -364,7 +367,9 @@ transaction completion cleanup
 Job/RBAC packaging
 ```
 
-The next slice should establish a freshly prepared, authorized breakglass safety credential while leaving normal managed consumers on A.
+The next slice should propagate the already-prepared breakglass credential
+to the configured switchable consumer locations while leaving A itself
+unchanged.
 
 ## Later rotation direction
 

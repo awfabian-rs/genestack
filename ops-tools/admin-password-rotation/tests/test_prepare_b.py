@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from admin_password_rotation.external_http import ExternalClientError, ExternalErrorCode
+from admin_password_rotation.external_http import ExternalErrorCode
 from admin_password_rotation.keystone import (
     FakeKeystoneClient, KeystoneAuthenticationResult, KeystoneAuthIndeterminate,
     KeystoneAuthSuccess, KeystoneIndeterminateReason, KeystonePasswordAuthRequest,
@@ -147,12 +147,20 @@ class AlteredAuthKeystone(FakeKeystoneClient):
         return replace(result, observation=observed)
 
 
-class FailingLockoutKeystone(FakeKeystoneClient):
-    def set_ignore_lockout_failure_attempts(
-        self, *, user_id: str, value: bool, management_token: SecretValue,
-    ) -> None:
-        del user_id, value, management_token
-        raise ExternalClientError(ExternalErrorCode.AUTHORIZATION_FAILURE)
+class ReadTrackingKeystone(FakeKeystoneClient):
+    def __init__(self) -> None:
+        super().__init__(
+            project_id="admin-project",
+            project_name="admin",
+            project_domain_id="default-domain",
+        )
+        self.user_read_calls: list[str] = []
+
+    def get_user(
+        self, *, user_id: str, management_token: SecretValue,
+    ) -> KeystoneUserObservation:
+        self.user_read_calls.append(user_id)
+        return super().get_user(user_id=user_id, management_token=management_token)
 
 
 class CrashAfterApplyPasswordSafe(FakePasswordSafeClient):
@@ -175,13 +183,12 @@ class CrashAfterApplyPasswordSafe(FakePasswordSafeClient):
 
 
 class CrashAfterApplyKeystone(FakeKeystoneClient):
-    def __init__(self, *, operation: str) -> None:
+    def __init__(self) -> None:
         super().__init__(
             project_id="admin-project",
             project_name="admin",
             project_domain_id="default-domain",
         )
-        self.operation = operation
         self.crashed = False
 
     def set_user_password(
@@ -192,17 +199,7 @@ class CrashAfterApplyKeystone(FakeKeystoneClient):
             user_id=user_id, new_password=new_password,
             management_token=management_token,
         )
-        if self.operation == "password" and not self.crashed:
-            self.crashed = True
-            raise RuntimeError("injected process termination")
-
-    def set_ignore_lockout_failure_attempts(
-        self, *, user_id: str, value: bool, management_token: SecretValue,
-    ) -> None:
-        super().set_ignore_lockout_failure_attempts(
-            user_id=user_id, value=value, management_token=management_token,
-        )
-        if self.operation == "lockout" and not self.crashed:
+        if not self.crashed:
             self.crashed = True
             raise RuntimeError("injected process termination")
 
@@ -299,7 +296,8 @@ def run(
 def test_b0_to_b2_completes_prepare_b_without_changing_a_or_consumers() -> None:
     store = MemoryStateStore()
     ps = passwordsafe()
-    ks = keystone()
+    ks = ReadTrackingKeystone()
+    add_keystone_users(ks)
     owner = Ownership()
 
     result = run(store, ps, ks, owner)
@@ -318,10 +316,14 @@ def test_b0_to_b2_completes_prepare_b_without_changing_a_or_consumers() -> None:
     assert ps.get_current(
         access=access(), project_id=10, credential_id=202,
     ).password == B_NEW
-    assert ps.update_calls == [(10, 101), (10, 202)]
+    assert ps.update_calls == [(10, 202)]
     assert ks.password_update_calls == ["breakglass-user"]
-    assert ks.lockout_update_calls == [("admin-user", False)]
-    assert owner.assertions == 4
+    assert ks.lockout_update_calls == []
+    assert ks.user_read_calls.count("admin-user") >= 2
+    assert owner.assertions == 2
+    assert {item.check_id for item in transaction.verifications} == {
+        "stable-a", "breakglass-b2",
+    }
     encoded = serialize_state_json(result.persisted.state)
     for secret_value in (A, B_OLD, B_NEW):
         assert secret_value.reveal().decode() not in encoded
@@ -540,7 +542,7 @@ def test_indeterminate_b_auth_blocks_without_reset_or_new_generation() -> None:
 
 def test_crash_after_candidate_intent_before_dispatch_may_regenerate() -> None:
     store = MemoryStateStore()
-    store.fail_after_apply = 6
+    store.fail_after_apply = 3
     ps = passwordsafe()
     ks = keystone()
 
@@ -550,7 +552,7 @@ def test_crash_after_candidate_intent_before_dispatch_may_regenerate() -> None:
     assert transaction is not None
     assert transaction.credential_mutation_intent is not None
     assert transaction.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
-    assert ps.update_calls == [(10, 101)]
+    assert ps.update_calls == []
 
     store.fail_after_apply = None
     result = run(store, ps, ks, generated=B_NEWER)
@@ -578,6 +580,9 @@ def test_crash_after_passwordsafe_b_apply_recovers_same_generation() -> None:
         CredentialGeneration.from_secret(B_NEW)
     )
     assert ps.update_calls.count((10, 202)) == 1
+    assert ps.update_calls.count((10, 101)) == 0
+    assert ks.password_update_calls == ["breakglass-user"]
+    assert ks.lockout_update_calls == []
 
 
 def test_crash_after_passwordsafe_b_readback_recovers_without_restaging() -> None:
@@ -597,7 +602,7 @@ def test_crash_after_passwordsafe_b_readback_recovers_without_restaging() -> Non
 def test_crash_after_keystone_b_apply_is_discovered_by_fresh_auth() -> None:
     store = MemoryStateStore()
     ps = passwordsafe()
-    ks = add_keystone_users(CrashAfterApplyKeystone(operation="password"))
+    ks = add_keystone_users(CrashAfterApplyKeystone())
 
     with pytest.raises(RuntimeError, match="injected process termination"):
         run(store, ps, ks)
@@ -606,25 +611,6 @@ def test_crash_after_keystone_b_apply_is_discovered_by_fresh_auth() -> None:
     assert result.state is PrepareBState.B2
     assert ks.password_update_calls == ["breakglass-user"]
     assert ps.update_calls.count((10, 202)) == 1
-
-
-def test_crash_during_each_same_value_capability_is_safely_reobserved() -> None:
-    ps_store = MemoryStateStore()
-    ps = CrashAfterApplyPasswordSafe(credential_id=101)
-    ps.add(PasswordSafeCredential(10, 101, "admin", 7, A))
-    ps.add(PasswordSafeCredential(10, 202, "breakglass", 3, B_OLD))
-    with pytest.raises(RuntimeError, match="injected process termination"):
-        run(ps_store, ps, keystone())
-    assert run(ps_store, ps, keystone()).state is PrepareBState.B2
-
-    lockout_store = MemoryStateStore()
-    lockout_ps = passwordsafe()
-    lockout_keystone = add_keystone_users(CrashAfterApplyKeystone(operation="lockout"))
-    with pytest.raises(RuntimeError, match="injected process termination"):
-        run(lockout_store, lockout_ps, lockout_keystone)
-    result = run(lockout_store, lockout_ps, lockout_keystone, generated=B_NEWER)
-    assert result.state is PrepareBState.B2
-    assert lockout_keystone.password_update_calls == ["breakglass-user"]
 
 
 def test_crash_after_prepare_b_completion_returns_existing_progress() -> None:
@@ -679,8 +665,9 @@ def test_observed_b2_in_prepare_phase_performs_no_b_password_write() -> None:
     result = run(store, ps, ks, generated=B_NEWER)
 
     assert result.state is PrepareBState.B2
-    assert ps.update_calls == [(10, 101)]
+    assert ps.update_calls == []
     assert ks.password_update_calls == []
+    assert ks.lockout_update_calls == []
 
 
 def test_stale_b2_progress_is_reobserved_and_reconciled_with_same_generation() -> None:
@@ -712,8 +699,9 @@ def test_stale_b2_progress_is_reobserved_and_reconciled_with_same_generation() -
     resumed = result.persisted.state.current_transaction
     assert resumed is not None
     assert resumed.new_b_sha256 == CredentialGeneration.from_secret(B_NEW)
-    assert ps.update_calls == [(10, 101)]
+    assert ps.update_calls == []
     assert ks.password_update_calls == ["breakglass-user"]
+    assert ks.lockout_update_calls == []
 
 
 def test_resume_b1_uses_passwordsafe_value_and_does_not_generate_another_b() -> None:
@@ -734,24 +722,11 @@ def test_resume_b1_uses_passwordsafe_value_and_does_not_generate_another_b() -> 
     assert result.persisted.state.current_transaction is not None
     assert result.persisted.state.current_transaction.new_b_sha256 == generation
     assert ps.update_calls.count((10, 202)) == 1
+    assert ps.update_calls.count((10, 101)) == 0
+    assert ks.lockout_update_calls == []
 
 
-def test_capability_checks_reobserve_ambiguous_same_value_mutations() -> None:
-    store = MemoryStateStore()
-    ps = passwordsafe()
-    ps.ambiguous_next_update_apply = False
-    ks = keystone()
-    ks.ambiguous_next_lockout_update_apply = False
-    result = run(store, ps, ks)
-    transaction = result.persisted.state.current_transaction
-    assert transaction is not None
-    checks = {item.check_id: item for item in transaction.verifications}
-    assert checks["passwordsafe-a-capability"].detail_code == "ambiguous-reobserved"
-    assert checks["breakglass-lockout-capability"].detail_code == "ambiguous-reobserved"
-    assert ks.lockout_update_calls == [("admin-user", False)]
-
-
-def test_definite_passwordsafe_capability_failure_blocks_before_b_staging() -> None:
+def test_definite_passwordsafe_b_staging_failure_blocks_safely() -> None:
     store = MemoryStateStore()
     ps = passwordsafe()
     ps.next_update_error = ExternalErrorCode.AUTHORIZATION_FAILURE
@@ -760,29 +735,13 @@ def test_definite_passwordsafe_capability_failure_blocks_before_b_staging() -> N
     with pytest.raises(PrepareBError) as raised:
         run(store, ps, ks)
 
-    assert raised.value.kind is PrepareBErrorCode.PASSWORDSAFE_CAPABILITY_FAILED
-    assert ps.update_calls == [(10, 101)]
+    assert raised.value.kind is PrepareBErrorCode.EXTERNAL_DEPENDENCY
+    assert ps.update_calls == [(10, 202)]
+    assert ps.get_current(
+        access=access(), project_id=10, credential_id=101,
+    ).password == A
     assert ks.password_update_calls == []
     assert ks.lockout_update_calls == []
-
-
-def test_definite_lockout_capability_failure_blocks_after_b2() -> None:
-    store = MemoryStateStore()
-    ps = passwordsafe()
-    ks = add_keystone_users(FailingLockoutKeystone(
-        project_id="admin-project",
-        project_name="admin",
-        project_domain_id="default-domain",
-    ))
-
-    with pytest.raises(PrepareBError) as raised:
-        run(store, ps, ks)
-
-    assert raised.value.kind is PrepareBErrorCode.LOCKOUT_CAPABILITY_FAILED
-    transaction = store.current.state.current_transaction
-    assert transaction is not None
-    assert transaction.phase is RotationPhase.PREPARE_B
-    assert transaction.new_b_sha256 == CredentialGeneration.from_secret(B_NEW)
 
 
 def test_dispatched_passwordsafe_intent_with_old_value_blocks_on_takeover() -> None:

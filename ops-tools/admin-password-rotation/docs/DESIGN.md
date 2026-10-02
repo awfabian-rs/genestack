@@ -3,7 +3,7 @@
 Status: Slices 1, 2A, 2B, 2C, 3A, and 3B are implemented.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
-  scoped credential/capability mutations.
+  scoped B credential mutations.
 - SWITCH_TO_B, ROTATE_A, and all later orchestration remain unimplemented.
 
 ## Boundaries
@@ -273,8 +273,7 @@ requires the admin user's `ignore_lockout_failure_attempts` value to be `false`.
 Disagreement blocks; it is never resolved by choosing one credential source and
 overwriting another.
 
-After stable A is established, PREPARE_B performs a same-value PasswordSafe A
-capability proof, then classifies B from external observations:
+After stable A is established, PREPARE_B classifies B from external observations:
 
 ```text
 B0  PasswordSafe B does not contain this transaction's intended generation
@@ -302,11 +301,13 @@ and Lease takeover always repeat fresh stable-A and B observations. The Lease's
 recovery-gate marker does not authorize blind replay.
 
 Every PREPARE_B mutation follows durable intent/dispatch recording, an immediate
-ownership assertion, one non-retried external write, and read-back. The two safe
-capability proofs are PasswordSafe A same-value and, after B2, admin lockout
-`false -> false` using B. Ambiguous same-value writes are accepted only after the
-normal value is freshly observed. Verification results retain bounded timestamps
-and generation identifiers, never credential values.
+ownership assertion, one non-retried external write, and postcondition
+verification. PasswordSafe B staging is PREPARE_B's first PasswordSafe mutation;
+its verified read-back establishes PasswordSafe mutation capability. PREPARE_B
+does not mutate PasswordSafe A or the admin lockout option. The later real
+lockout-suppression mutation establishes that capability before A rotation.
+Verification results retain bounded timestamps and generation identifiers, never
+credential values.
 
 Completion revalidates stable A, PasswordSafe B and authorized B authentication,
 then records the next phase as `SWITCH_TO_B` and stops. It does not mutate any
