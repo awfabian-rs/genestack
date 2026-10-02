@@ -9,8 +9,7 @@ from urllib.parse import quote
 
 from .external_http import (
     ExternalClientError, ExternalErrorCode, HttpRequest, HttpResponse, HttpTransport,
-    HttpTransportError, HttpTransportErrorCode, json_request_body, json_response_object,
-    secret_text,
+    HttpTransportError, json_request_body, json_response_object, secret_text,
 )
 from .errors import ReadError
 from .model import SecretValue
@@ -170,6 +169,12 @@ def _service_error(response: HttpResponse) -> ExternalClientError:
     return ExternalClientError(ExternalErrorCode.UNEXPECTED_RESPONSE)
 
 
+def _mutation_response_error(response: HttpResponse) -> ExternalClientError:
+    if 200 <= response.status_code < 300 or 500 <= response.status_code < 600:
+        return ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS)
+    return _service_error(response)
+
+
 def _management_headers(
     token: SecretValue, *, mutation: bool = False,
 ) -> tuple[tuple[str, str], ...]:
@@ -319,20 +324,18 @@ class HttpKeystoneClient:
                 _management_headers(management_token, mutation=True),
                 json_request_body(body), mutation=True,
             ))
-        except HttpTransportError as exc:
-            kind = (
-                ExternalErrorCode.MUTATION_AMBIGUOUS
-                if exc.kind is HttpTransportErrorCode.MUTATION_AMBIGUOUS
-                else ExternalErrorCode.DEPENDENCY_FAILURE
-            )
-            raise ExternalClientError(kind) from None
+        except HttpTransportError:
+            raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS) from None
         if response.status_code != 200:
-            raise _service_error(response)
-        root = json_response_object(response)
-        user = _mapping(root.get("user"))
-        returned_id = _string(user.get("id"))
-        if returned_id != user_id:
-            raise ExternalClientError(ExternalErrorCode.RECORD_MISMATCH)
+            raise _mutation_response_error(response)
+        try:
+            root = json_response_object(response)
+            user = _mapping(root.get("user"))
+            returned_id = _string(user.get("id"))
+            if returned_id != user_id:
+                raise ExternalClientError(ExternalErrorCode.RECORD_MISMATCH)
+        except ExternalClientError:
+            raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS) from None
 
 
 @dataclass

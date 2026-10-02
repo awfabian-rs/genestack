@@ -223,6 +223,12 @@ CA input. Mutating requests have no automatic retry. A transport interruption
 during a mutation is reported as ambiguous so future orchestration must reobserve
 external state before deciding whether to act again.
 
+For external mutations, a non-success or malformed response does not by itself
+prove that the server did not apply the change. Transport failures, 5xx responses,
+unexpected 2xx responses, and untrustworthy success responses are reported as
+ambiguous when application cannot be ruled out. Later workflow must reobserve the
+actual external state before deciding whether another mutation is permitted.
+
 Keystone v3 password authentication has three typed outcomes: success, definite
 credential rejection, and indeterminate. Only an unambiguous authentication 401
 is credential rejection. Transport, server, policy and malformed-response failures

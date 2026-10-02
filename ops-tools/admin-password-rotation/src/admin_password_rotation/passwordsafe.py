@@ -8,8 +8,7 @@ from urllib.parse import quote
 
 from .external_http import (
     ExternalClientError, ExternalErrorCode, HttpRequest, HttpResponse, HttpTransport,
-    HttpTransportError, HttpTransportErrorCode, json_request_body,
-    json_response_object, secret_text,
+    HttpTransportError, json_request_body, json_response_object, secret_text,
 )
 from .errors import ReadError
 from .model import SecretValue
@@ -94,6 +93,12 @@ def _service_error(response: HttpResponse) -> ExternalClientError:
     if response.status_code == 429 or response.status_code >= 500:
         return ExternalClientError(ExternalErrorCode.DEPENDENCY_FAILURE)
     return ExternalClientError(ExternalErrorCode.UNEXPECTED_RESPONSE)
+
+
+def _mutation_response_error(response: HttpResponse) -> ExternalClientError:
+    if 200 <= response.status_code < 300 or 500 <= response.status_code < 600:
+        return ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS)
+    return _service_error(response)
 
 
 def _passwordsafe_path(project_id: int, credential_id: int) -> str:
@@ -195,15 +200,11 @@ class HttpPasswordSafeClient:
                 json_request_body({"credential": {"password": secret_text(new_password)}}),
                 mutation=True,
             ))
-        except HttpTransportError as exc:
-            kind = (
-                ExternalErrorCode.MUTATION_AMBIGUOUS
-                if exc.kind is HttpTransportErrorCode.MUTATION_AMBIGUOUS
-                else ExternalErrorCode.DEPENDENCY_FAILURE
-            )
-            raise ExternalClientError(kind) from None
+        except HttpTransportError:
+            raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS) from None
         if response.status_code != 204:
-            raise _service_error(response)
+            raise _mutation_response_error(response)
+
 
 class FakeRackspaceIdentityClient:
     def __init__(self, username: str, password: SecretValue, access: IdentityAccess) -> None:
@@ -225,6 +226,7 @@ class FakePasswordSafeClient:
 
     def __init__(self) -> None:
         self._records: dict[tuple[int, int], PasswordSafeCredential] = {}
+        self.next_update_error: ExternalErrorCode | None = None
         self.ambiguous_next_update_apply: bool | None = None
 
     def add(self, credential: PasswordSafeCredential) -> None:
@@ -249,6 +251,10 @@ class FakePasswordSafeClient:
         new_password: SecretValue,
     ) -> None:
         del access
+        if self.next_update_error is not None:
+            kind = self.next_update_error
+            self.next_update_error = None
+            raise ExternalClientError(kind)
         key = (project_id, credential_id)
         if key not in self._records:
             raise ExternalClientError(ExternalErrorCode.NOT_FOUND)

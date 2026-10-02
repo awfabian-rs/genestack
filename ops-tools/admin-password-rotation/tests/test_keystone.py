@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Literal
 
 import pytest
 
@@ -28,6 +29,7 @@ from admin_password_rotation.model import SecretValue
 PASSWORD = "ADMIN_SECRET_SENTINEL"
 TOKEN = "KEYSTONE_TOKEN_SENTINEL"
 MANAGEMENT_TOKEN = SecretValue(b"MANAGEMENT_TOKEN_SENTINEL")
+MutationKind = Literal["password", "lockout"]
 
 
 def response(
@@ -73,6 +75,18 @@ def auth_request() -> KeystonePasswordAuthRequest:
 def decoded_body(body: bytes | None) -> object:
     assert body is not None
     return json.loads(body)
+
+
+def perform_mutation(client: HttpKeystoneClient, mutation: MutationKind) -> None:
+    if mutation == "password":
+        client.set_user_password(
+            user_id="admin-user", new_password=SecretValue(PASSWORD.encode()),
+            management_token=MANAGEMENT_TOKEN,
+        )
+    else:
+        client.set_ignore_lockout_failure_attempts(
+            user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
+        )
 
 
 def test_password_auth_success_exposes_identity_scope_and_roles() -> None:
@@ -259,65 +273,72 @@ def test_lockout_patch_changes_only_requested_option() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mutation_response", "kind"),
+    ("status", "kind"),
     [
-        (
-            response(200, user_update_document("different-user")),
-            ExternalErrorCode.RECORD_MISMATCH,
-        ),
-        (response(200, {}), ExternalErrorCode.MALFORMED_RESPONSE),
-        (response(200, user_update_document(None)), ExternalErrorCode.MALFORMED_RESPONSE),
-        (response(200, user_update_document("")), ExternalErrorCode.MALFORMED_RESPONSE),
-        (response(204), ExternalErrorCode.UNEXPECTED_RESPONSE),
-        (response(403), ExternalErrorCode.AUTHORIZATION_FAILURE),
-        (response(500), ExternalErrorCode.DEPENDENCY_FAILURE),
+        (400, ExternalErrorCode.UNEXPECTED_RESPONSE),
+        (401, ExternalErrorCode.AUTHORIZATION_FAILURE),
+        (403, ExternalErrorCode.AUTHORIZATION_FAILURE),
+        (404, ExternalErrorCode.NOT_FOUND),
     ],
 )
-def test_password_mutation_rejects_invalid_or_unsuccessful_responses(
-    mutation_response: HttpResponse, kind: ExternalErrorCode,
+@pytest.mark.parametrize("mutation", ["password", "lockout"])
+def test_mutation_definite_rejections_remain_non_ambiguous(
+    status: int, kind: ExternalErrorCode, mutation: MutationKind,
 ) -> None:
     transport = FakeHttpTransport()
-    transport.queue_response(mutation_response)
+    transport.queue_response(response(status))
     with pytest.raises(ExternalClientError) as raised:
-        HttpKeystoneClient(transport).set_user_password(
-            user_id="admin-user", new_password=SecretValue(PASSWORD.encode()),
-            management_token=MANAGEMENT_TOKEN,
-        )
+        perform_mutation(HttpKeystoneClient(transport), mutation)
     assert raised.value.kind is kind
+    assert raised.value.kind is not ExternalErrorCode.MUTATION_AMBIGUOUS
 
 
-def test_lockout_mutation_rejects_204_as_unexpected() -> None:
+@pytest.mark.parametrize("status", [202, 204, 500, 503])
+@pytest.mark.parametrize("mutation", ["password", "lockout"])
+def test_mutation_unexpected_2xx_and_5xx_are_ambiguous(
+    status: int, mutation: MutationKind,
+) -> None:
     transport = FakeHttpTransport()
-    transport.queue_response(response(204))
+    transport.queue_response(response(status, {"secret": PASSWORD}))
     with pytest.raises(ExternalClientError) as raised:
-        HttpKeystoneClient(transport).set_ignore_lockout_failure_attempts(
-            user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
-        )
-    assert raised.value.kind is ExternalErrorCode.UNEXPECTED_RESPONSE
+        perform_mutation(HttpKeystoneClient(transport), mutation)
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
+    assert PASSWORD not in str(raised.value) + repr(raised.value)
 
 
-def test_mutation_timeout_is_ambiguous_and_secret_safe() -> None:
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        user_update_document(None),
+        user_update_document(""),
+        user_update_document("different-user"),
+    ],
+)
+@pytest.mark.parametrize("mutation", ["password", "lockout"])
+def test_mutation_untrustworthy_200_is_ambiguous(
+    document: dict[str, object], mutation: MutationKind,
+) -> None:
     transport = FakeHttpTransport()
-    transport.queue_error(HttpTransportErrorCode.MUTATION_AMBIGUOUS)
+    transport.queue_response(response(200, document))
     with pytest.raises(ExternalClientError) as raised:
-        HttpKeystoneClient(transport).set_user_password(
-            user_id="admin-user", new_password=SecretValue(PASSWORD.encode()),
-            management_token=MANAGEMENT_TOKEN,
-        )
+        perform_mutation(HttpKeystoneClient(transport), mutation)
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
+
+
+@pytest.mark.parametrize("transport_error", list(HttpTransportErrorCode))
+@pytest.mark.parametrize("mutation", ["password", "lockout"])
+def test_mutation_transport_failure_is_ambiguous_and_secret_safe(
+    transport_error: HttpTransportErrorCode, mutation: MutationKind,
+) -> None:
+    transport = FakeHttpTransport()
+    transport.queue_error(transport_error)
+    with pytest.raises(ExternalClientError) as raised:
+        perform_mutation(HttpKeystoneClient(transport), mutation)
     assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
     visible = str(raised.value) + repr(raised.value)
     assert PASSWORD not in visible
     assert "MANAGEMENT_TOKEN_SENTINEL" not in visible
-
-
-def test_lockout_mutation_timeout_is_ambiguous() -> None:
-    transport = FakeHttpTransport()
-    transport.queue_error(HttpTransportErrorCode.MUTATION_AMBIGUOUS)
-    with pytest.raises(ExternalClientError) as raised:
-        HttpKeystoneClient(transport).set_ignore_lockout_failure_attempts(
-            user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
-        )
-    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
 
 
 def test_behavioral_fake_changes_accepted_password_and_lockout_option() -> None:
@@ -345,3 +366,34 @@ def test_behavioral_fake_changes_accepted_password_and_lockout_option() -> None:
     assert fake.get_user(
         user_id="admin-user", management_token=MANAGEMENT_TOKEN,
     ).ignore_lockout_failure_attempts is True
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        ExternalErrorCode.AUTHORIZATION_FAILURE,
+        ExternalErrorCode.MUTATION_AMBIGUOUS,
+    ],
+)
+def test_behavioral_fake_supports_typed_mutation_failures(
+    kind: ExternalErrorCode,
+) -> None:
+    fake = FakeKeystoneClient(
+        project_id="admin-project", project_name="admin-project-name",
+        project_domain_id="default-domain",
+    )
+    fake.add_user(
+        KeystoneUserObservation(
+            "admin-user", "admin", "default-domain", True, "admin-project", False,
+        ),
+        SecretValue(b"old-password"),
+    )
+    fake.next_mutation_error = kind
+
+    with pytest.raises(ExternalClientError) as raised:
+        fake.set_user_password(
+            user_id="admin-user", new_password=SecretValue(b"new-password"),
+            management_token=MANAGEMENT_TOKEN,
+        )
+
+    assert raised.value.kind is kind

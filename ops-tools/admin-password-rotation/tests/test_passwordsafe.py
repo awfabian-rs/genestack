@@ -202,9 +202,53 @@ def test_separate_get_after_patch_can_confirm_value_and_version() -> None:
     assert observed.password == SecretValue(NEW_PASSWORD.encode())
 
 
-def test_password_update_timeout_is_ambiguous_and_secret_safe() -> None:
+@pytest.mark.parametrize(
+    ("status", "kind"),
+    [
+        (400, ExternalErrorCode.UNEXPECTED_RESPONSE),
+        (401, ExternalErrorCode.CREDENTIAL_REJECTED),
+        (403, ExternalErrorCode.AUTHORIZATION_FAILURE),
+        (404, ExternalErrorCode.NOT_FOUND),
+    ],
+)
+def test_password_update_definite_rejections_remain_non_ambiguous(
+    status: int, kind: ExternalErrorCode,
+) -> None:
     transport = FakeHttpTransport()
-    transport.queue_error(HttpTransportErrorCode.MUTATION_AMBIGUOUS)
+    transport.queue_response(response(status))
+    with pytest.raises(ExternalClientError) as raised:
+        HttpPasswordSafeClient(transport).update_password(
+            access=access(), project_id=101, credential_id=202,
+            new_password=SecretValue(NEW_PASSWORD.encode()),
+        )
+    assert raised.value.kind is kind
+    assert raised.value.kind is not ExternalErrorCode.MUTATION_AMBIGUOUS
+
+
+@pytest.mark.parametrize("status", [200, 202, 500, 503])
+def test_password_update_unexpected_2xx_and_5xx_are_ambiguous(status: int) -> None:
+    transport = FakeHttpTransport()
+    transport.queue_response(response(status, {
+        "password": NEW_PASSWORD,
+        "token": PASSWORDSAFE_TOKEN,
+    }))
+    with pytest.raises(ExternalClientError) as raised:
+        HttpPasswordSafeClient(transport).update_password(
+            access=access(), project_id=101, credential_id=202,
+            new_password=SecretValue(NEW_PASSWORD.encode()),
+        )
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
+    visible = str(raised.value) + repr(raised.value)
+    assert NEW_PASSWORD not in visible
+    assert PASSWORDSAFE_TOKEN not in visible
+
+
+@pytest.mark.parametrize("transport_error", list(HttpTransportErrorCode))
+def test_password_update_transport_failure_is_ambiguous_and_secret_safe(
+    transport_error: HttpTransportErrorCode,
+) -> None:
+    transport = FakeHttpTransport()
+    transport.queue_error(transport_error)
     with pytest.raises(ExternalClientError) as raised:
         HttpPasswordSafeClient(transport).update_password(
             access=access(), project_id=101, credential_id=202,
@@ -246,3 +290,20 @@ def test_behavioral_fake_supports_version_advancement_and_ambiguous_apply() -> N
     current = fake.get_current(access=access(), project_id=101, credential_id=202)
     assert current.version == 10
     assert current.password == SecretValue(NEW_PASSWORD.encode())
+
+
+def test_behavioral_fake_supports_definite_rejection_without_applying() -> None:
+    fake = FakePasswordSafeClient()
+    fake.add(PasswordSafeCredential(
+        101, 202, "admin", 9, SecretValue(CURRENT_PASSWORD.encode()),
+    ))
+    fake.next_update_error = ExternalErrorCode.AUTHORIZATION_FAILURE
+    with pytest.raises(ExternalClientError) as raised:
+        fake.update_password(
+            access=access(), project_id=101, credential_id=202,
+            new_password=SecretValue(NEW_PASSWORD.encode()),
+        )
+    assert raised.value.kind is ExternalErrorCode.AUTHORIZATION_FAILURE
+    current = fake.get_current(access=access(), project_id=101, credential_id=202)
+    assert current.version == 9
+    assert current.password == SecretValue(CURRENT_PASSWORD.encode())
