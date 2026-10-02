@@ -20,6 +20,10 @@ rotation behavior remains unimplemented.
 | `state_store.py` | Conditional Kubernetes API Secret persistence and read-after-write validation for `state.json`. |
 | `kubernetes_api.py` | Shared narrow construction boundary for generated Kubernetes API clients. |
 | `lease.py` | Validated Lease observation, conditional ownership operations and sticky local renewal guard. |
+| `external_http.py` | Bounded, secret-safe direct HTTP transport shared by external credential adapters. |
+| `keystone.py` | Typed Keystone v3 authentication, exact-user password update and user-option operations. |
+| `passwordsafe.py` | Rackspace Identity authentication and PasswordSafe current-credential read/update operations. |
+| `passwords.py` | Cryptographically secure administrative-password generation. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -209,6 +213,50 @@ Lease expiry is not proof that the previous process is dead or unable to call
 Keystone, PasswordSafe or Kubernetes. The Lease is not hard fencing. Future
 mutation code must combine current ownership with fresh external observations,
 object-level concurrency and transaction recovery checks.
+
+## External credential-system boundaries
+
+Slice 3A provides direct HTTP client boundaries without connecting them to the
+CLI, transaction state, Lease acquisition or workflow decisions. HTTP calls use
+bounded 5-second connect and 30-second request timeouts with configurable trusted
+CA input. Mutating requests have no automatic retry. A transport interruption
+during a mutation is reported as ambiguous so future orchestration must reobserve
+external state before deciding whether to act again.
+
+For external mutations, a non-success or malformed response does not by itself
+prove that the server did not apply the change. Transport failures, 5xx responses,
+unexpected 2xx responses, and untrustworthy success responses are reported as
+ambiguous when application cannot be ruled out. Later workflow must reobserve the
+actual external state before deciding whether another mutation is permitted.
+
+Keystone v3 password authentication has three typed outcomes: success, definite
+credential rejection, and indeterminate. Only an unambiguous authentication 401
+is credential rejection. Transport, server, policy and malformed-response failures
+remain indeterminate. Success includes the observed user, domain, project, roles
+and expiry so future policy can validate identity and scope rather than treating
+token issuance alone as sufficient. Administrative password updates address the
+recorded user ID, and lockout-option updates patch only
+`ignore_lockout_failure_attempts`. Both operations use `PATCH /v3/users/{user_id}`
+and require HTTP 200 with a response `user.id` matching the requested ID. The
+returned representation proves only that Keystone identified the intended resource;
+fresh authentication is still required to observe whether an intended password works.
+
+Rackspace Identity Internal v2 exchanges the configured AD service-account
+credential for a redacted token used as PasswordSafe `X-Auth-Token`. Normal
+PasswordSafe reads use JSON. Password updates PATCH only the password, and HTTP
+204 is merely acceptance of the request, not proof of durable completion. Future
+workflow must use a separate GET to verify the observed credential and version.
+Historical PasswordSafe retrieval is not implemented in Slice 3A. Exact old-A
+history remains a deferred exceptional recovery capability from the implementation
+brief and will be implemented only if and when the later A-recovery slice
+demonstrates that it is required.
+
+Replacement administrative passwords are exactly 32 characters from ASCII
+letters, digits and underscore, selected with Python's cryptographic `secrets`
+source. Passwords and tokens use the existing redacted `SecretValue`; request
+headers/bodies and response content are excluded from representations, and adapter
+errors expose fixed diagnostics rather than raw HTTP content. No password or token
+is persisted by these clients.
 
 ## Security and deployment limits
 
