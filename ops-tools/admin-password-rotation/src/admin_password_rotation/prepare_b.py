@@ -524,6 +524,7 @@ def _stage_b(
         updated_at=now,
     )
     session.write(transaction)
+    _assert_owned(ownership)
     session.write(replace(
         session.transaction,
         credential_mutation_intent=_intent(
@@ -533,7 +534,6 @@ def _stage_b(
         ),
         updated_at=now,
     ))
-    _assert_owned(ownership)
     ambiguous = False
     try:
         passwordsafe.update_password(
@@ -618,6 +618,7 @@ def _establish_b2(
         updated_at=now,
     ))
     management_token = _fresh_a_token(inputs, keystone, now)
+    _assert_owned(ownership)
     session.write(replace(
         session.transaction,
         credential_mutation_intent=_intent(
@@ -627,7 +628,6 @@ def _establish_b2(
         ),
         updated_at=now,
     ))
-    _assert_owned(ownership)
     ambiguous = False
     try:
         keystone.set_user_password(
@@ -709,9 +709,10 @@ def run_prepare_b(
 ) -> PrepareBResult:
     """Run or resume PREPARE_B from fresh external observations.
 
-    Every external mutation is preceded by a durable intent/dispatch boundary
-    and an ownership assertion.  A successful return has only advanced durable
-    phase to ``SWITCH_TO_B``; no propagation work is performed here.
+    Every external mutation is preceded by durable pre-dispatch intent, an
+    ownership assertion, and then a durable dispatch boundary.  A successful
+    return has only advanced durable phase to ``SWITCH_TO_B``; no propagation
+    work is performed here.
     """
     now = clock()
     if now.tzinfo is None or now.utcoffset() is None:

@@ -284,15 +284,21 @@ B2  PasswordSafe B contains it and fresh B authentication proves the recorded
 
 The intended B generation is a SHA-256 identifier only. B-new clear text remains
 in memory until it is read back from PasswordSafe. B0 persists the generation and
-`STAGE_B_PASSWORDSAFE` intent before asserting ownership and issuing a password-only
-PATCH. B1 recovers the exact current PasswordSafe value, persists
-`RESET_B_KEYSTONE`, obtains fresh validated A authorization, asserts ownership and
-updates only the recorded breakglass user ID. B2 performs no B password write.
+`STAGE_B_PASSWORDSAFE` pre-dispatch intent, asserts ownership, records
+`DISPATCH_UNRESOLVED`, and issues a password-only PATCH. B1 recovers the exact
+current PasswordSafe value, persists `RESET_B_KEYSTONE`, obtains fresh validated A
+authorization, asserts ownership, records `DISPATCH_UNRESOLVED`, and updates only
+the recorded breakglass user ID. B2 performs no B password write.
 No old-B fingerprint, PasswordSafe history, rollback, user creation or grant repair
 is involved.
 
 Schema-v2 intent state includes `dispatch_unresolved` to distinguish a durable
 pre-dispatch intent from an operation that may have reached an external service.
+A generated credential becomes sticky at that external dispatch boundary, not
+merely when its SHA-256 generation identifier is persisted. Before the boundary,
+a candidate proven never to have been dispatched may be abandoned and regenerated
+when its clear text is no longer available. Once dispatch is unresolved, or
+PasswordSafe contains the intended generation, replacement is forbidden.
 After an ambiguous PasswordSafe B write, a matching read-back advances to B1; an
 old or unobservable value blocks without retrying or inventing B-newer. After an
 ambiguous Keystone reset, fresh successful B authentication advances to B2;
@@ -300,9 +306,10 @@ rejection or indeterminacy blocks and preserves the same staged generation. Resu
 and Lease takeover always repeat fresh stable-A and B observations. The Lease's
 recovery-gate marker does not authorize blind replay.
 
-Every PREPARE_B mutation follows durable intent/dispatch recording, an immediate
-ownership assertion, one non-retried external write, and postcondition
-verification. PasswordSafe B staging is PREPARE_B's first PasswordSafe mutation;
+Every PREPARE_B mutation follows durable pre-dispatch intent, an immediate
+ownership assertion, durable dispatch-unresolved recording, one non-retried
+external write, and postcondition verification. PasswordSafe B staging is
+PREPARE_B's first PasswordSafe mutation;
 its verified read-back establishes PasswordSafe mutation capability. PREPARE_B
 does not mutate PasswordSafe A or the admin lockout option. The later real
 lockout-suppression mutation establishes that capability before A rotation.

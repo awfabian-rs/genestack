@@ -83,14 +83,17 @@ class MemoryStateStore(StateStore):
 
 
 class Ownership:
-    def __init__(self, *, recovery: bool = False) -> None:
+    def __init__(
+        self, *, recovery: bool = False, fail_on_assertion: int | None = None,
+    ) -> None:
         self.requires_recovery_gate = recovery
         self.assertions = 0
         self.fail = False
+        self.fail_on_assertion = fail_on_assertion
 
     def assert_owned(self) -> None:
         self.assertions += 1
-        if self.fail:
+        if self.fail or self.assertions == self.fail_on_assertion:
             raise PrepareBError(PrepareBErrorCode.OWNERSHIP_LOST)
 
 
@@ -400,20 +403,68 @@ def test_stable_a_requires_exact_identity_scope_and_determinate_auth(
     assert ks.lockout_update_calls == []
 
 
-def test_ownership_loss_prevents_first_and_all_later_effects() -> None:
+def test_passwordsafe_ownership_loss_stays_predispatch_and_regenerates() -> None:
     store = MemoryStateStore()
     ps = passwordsafe()
     ks = keystone()
-    owner = Ownership()
-    owner.fail = True
+    owner = Ownership(fail_on_assertion=1)
 
     with pytest.raises(PrepareBError) as raised:
         run(store, ps, ks, owner)
 
     assert raised.value.kind is PrepareBErrorCode.OWNERSHIP_LOST
+    transaction = store.current.state.current_transaction
+    assert transaction is not None
+    assert transaction.new_b_sha256 == CredentialGeneration.from_secret(B_NEW)
+    assert transaction.credential_mutation_intent is not None
+    assert transaction.credential_mutation_intent.step is (
+        CredentialMutationStep.STAGE_B_PASSWORDSAFE
+    )
+    assert transaction.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
     assert ps.update_calls == []
     assert ks.password_update_calls == []
     assert ks.lockout_update_calls == []
+
+    result = run(store, ps, ks, generated=B_NEWER)
+
+    assert result.state is PrepareBState.B2
+    resumed = result.persisted.state.current_transaction
+    assert resumed is not None
+    assert resumed.new_b_sha256 == CredentialGeneration.from_secret(B_NEWER)
+    assert ps.update_calls == [(10, 202)]
+    assert ps.get_current(
+        access=access(), project_id=10, credential_id=202,
+    ).password == B_NEWER
+
+
+def test_keystone_ownership_loss_stays_predispatch_and_resumes_generation() -> None:
+    store = MemoryStateStore()
+    ps = passwordsafe()
+    ks = keystone()
+
+    with pytest.raises(PrepareBError) as raised:
+        run(store, ps, ks, Ownership(fail_on_assertion=2))
+
+    assert raised.value.kind is PrepareBErrorCode.OWNERSHIP_LOST
+    transaction = store.current.state.current_transaction
+    assert transaction is not None
+    assert transaction.new_b_sha256 == CredentialGeneration.from_secret(B_NEW)
+    assert transaction.credential_mutation_intent is not None
+    assert transaction.credential_mutation_intent.step is (
+        CredentialMutationStep.RESET_B_KEYSTONE
+    )
+    assert transaction.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
+    assert ps.update_calls == [(10, 202)]
+    assert ks.password_update_calls == []
+
+    result = run(store, ps, ks, generated=B_NEWER)
+
+    assert result.state is PrepareBState.B2
+    resumed = result.persisted.state.current_transaction
+    assert resumed is not None
+    assert resumed.new_b_sha256 == CredentialGeneration.from_secret(B_NEW)
+    assert ps.update_calls == [(10, 202)]
+    assert ks.password_update_calls == ["breakglass-user"]
 
 
 def test_resume_rejects_replaced_breeder_object_before_mutation() -> None:
@@ -752,12 +803,18 @@ def test_dispatched_passwordsafe_intent_with_old_value_blocks_on_takeover() -> N
     with pytest.raises(PrepareBError):
         run(store, ps, keystone())
     calls = ps.update_calls.count((10, 202))
+    transaction = store.current.state.current_transaction
+    assert transaction is not None
+    generation = transaction.new_b_sha256
 
     with pytest.raises(PrepareBError) as raised:
         run(store, ps, keystone(), Ownership(recovery=True), generated=B_NEWER)
 
     assert raised.value.kind is PrepareBErrorCode.PASSWORDSAFE_B_UNRESOLVED
     assert ps.update_calls.count((10, 202)) == calls
+    transaction = store.current.state.current_transaction
+    assert transaction is not None
+    assert transaction.new_b_sha256 == generation
 
 
 def test_state_validator_accepts_dispatch_unresolved_intent() -> None:
