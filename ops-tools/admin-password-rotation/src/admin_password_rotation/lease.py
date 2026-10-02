@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Protocol, Self, cast, runtime_checkable
@@ -23,6 +23,7 @@ from .kubernetes_api import create_kubernetes_api, validate_api_options
 from .validation import is_object_name, object_mapping
 
 MAX_LEASE_BYTES = 1024 * 1024
+DEFAULT_LEASE_API_TIMEOUT_SECONDS = 30.0
 _KUBERNETES_TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})",
@@ -138,7 +139,6 @@ class LeaseDisposition(Enum):
     UNHELD = "unheld"
     HELD_BY_SELF = "held_by_self"
     HELD_BY_ANOTHER = "held_by_another"
-    EXPIRED = "expired"
 
 
 class AcquisitionKind(Enum):
@@ -181,22 +181,13 @@ def _parse_timestamp(value: object) -> datetime | None:
 
 
 def classify_lease(
-    observation: LeaseObservation, owner: ExecutionOwner, *, now: datetime,
+    observation: LeaseObservation, owner: ExecutionOwner,
 ) -> LeaseDisposition:
-    """Classify one server observation, treating future renew times as held.
-
-    Local wall-clock skew therefore cannot make a future timestamp appear expired.
-    The watchdog separately uses a monotonic clock for local renewal freshness.
-    """
-    current = _utc(now)
+    """Classify the observed holder without making a wall-clock expiry claim."""
     if observation.holder_identity is None:
         return LeaseDisposition.UNHELD
-    duration = observation.lease_duration_seconds
-    renewed = observation.renew_time
-    if duration is None or renewed is None:
+    if observation.lease_duration_seconds is None or observation.renew_time is None:
         raise LeaseError(LeaseErrorCode.MALFORMED)
-    if current >= renewed + timedelta(seconds=duration):
-        return LeaseDisposition.EXPIRED
     if observation.holder_identity == owner.holder_identity:
         return LeaseDisposition.HELD_BY_SELF
     return LeaseDisposition.HELD_BY_ANOTHER
@@ -257,9 +248,14 @@ class KubernetesApiLeaseTransport:
 
     def __init__(
         self, api: _CoordinationV1LeaseApi, serializer: _KubernetesSerializer,
-        *, timeout: float = 60.0,
+        *, timeout: float = DEFAULT_LEASE_API_TIMEOUT_SECONDS,
+        timing: LeaseTiming = LeaseTiming(),
     ) -> None:
         validate_api_options(context=None, timeout=timeout)
+        if timeout >= timing.renewal_deadline_seconds:
+            raise ReadError(
+                "invalid_timeout", "Lease API timeout must be less than the renewal deadline.",
+            )
         self._api = api
         self._serializer = serializer
         self._timeout = timeout
@@ -267,9 +263,14 @@ class KubernetesApiLeaseTransport:
     @classmethod
     def from_config(
         cls, *, context: str | None = None, kubeconfig: Path | None = None,
-        timeout: float = 60.0,
+        timeout: float = DEFAULT_LEASE_API_TIMEOUT_SECONDS,
+        timing: LeaseTiming = LeaseTiming(),
     ) -> Self:
         validate_api_options(context=context, timeout=timeout)
+        if timeout >= timing.renewal_deadline_seconds:
+            raise ReadError(
+                "invalid_timeout", "Lease API timeout must be less than the renewal deadline.",
+            )
         try:
             handle = create_kubernetes_api(
                 "CoordinationV1Api", context=context, kubeconfig=kubeconfig,
@@ -279,7 +280,7 @@ class KubernetesApiLeaseTransport:
         return cls(
             cast(_CoordinationV1LeaseApi, handle.api),
             cast(_KubernetesSerializer, handle.serializer),
-            timeout=timeout,
+            timeout=timeout, timing=timing,
         )
 
     def read(self, reference: LeaseReference) -> bytes:
@@ -391,15 +392,58 @@ def _parse_lease(raw: bytes, reference: LeaseReference) -> LeaseObservation:
         raise LeaseError(LeaseErrorCode.MALFORMED) from None
 
 
+@dataclass(frozen=True)
+class _ForeignLeaseRecord:
+    uid: str
+    holder_identity: str
+    resource_version: str
+
+
+@dataclass(frozen=True)
+class _ForeignLeaseObservationWindow:
+    record: _ForeignLeaseRecord
+    first_seen_monotonic: float
+
+
 class KubernetesLeaseStore:
     """Validated observation and conditional ownership changes for one Lease."""
 
     def __init__(
         self, reference: LeaseReference, timing: LeaseTiming, transport: LeaseTransport,
+        *, monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._reference = reference
         self._timing = timing
         self._transport = transport
+        self._monotonic = monotonic
+        self._foreign_lock = threading.Lock()
+        self._foreign_window: _ForeignLeaseObservationWindow | None = None
+
+    def _clear_foreign_window(self) -> None:
+        with self._foreign_lock:
+            self._foreign_window = None
+
+    def _foreign_takeover_eligible(self, observed: LeaseObservation) -> bool:
+        holder = observed.holder_identity
+        duration = observed.lease_duration_seconds
+        if holder is None or duration is None:
+            raise LeaseError(LeaseErrorCode.MALFORMED)
+        record = _ForeignLeaseRecord(
+            observed.revision.uid, holder, observed.revision.resource_version,
+        )
+        observed_at = self._monotonic()
+        if not math.isfinite(observed_at):
+            raise LeaseError(LeaseErrorCode.OWNERSHIP_UNCERTAIN)
+        with self._foreign_lock:
+            window = self._foreign_window
+            if (
+                window is None
+                or window.record != record
+                or observed_at < window.first_seen_monotonic
+            ):
+                self._foreign_window = _ForeignLeaseObservationWindow(record, observed_at)
+                return False
+            return observed_at - window.first_seen_monotonic >= duration
 
     def observe(self) -> LeaseObservation:
         try:
@@ -452,21 +496,25 @@ class KubernetesLeaseStore:
     def acquire(self, owner: ExecutionOwner, *, now: datetime) -> LeaseAcquisition:
         current_time = _utc(now)
         observed = self.observe()
-        disposition = classify_lease(observed, owner, now=current_time)
-        if disposition is LeaseDisposition.HELD_BY_ANOTHER:
+        disposition = classify_lease(observed, owner)
+        takeover = disposition is LeaseDisposition.HELD_BY_ANOTHER
+        if takeover and not self._foreign_takeover_eligible(observed):
             raise LeaseError(LeaseErrorCode.HELD_BY_ANOTHER)
-        kind = {
-            LeaseDisposition.UNHELD: AcquisitionKind.FRESH,
-            LeaseDisposition.HELD_BY_SELF: AcquisitionKind.CONTINUED,
-            LeaseDisposition.EXPIRED: AcquisitionKind.EXPIRED_TAKEOVER,
-        }[disposition]
+        if not takeover:
+            self._clear_foreign_window()
+        if takeover:
+            kind = AcquisitionKind.EXPIRED_TAKEOVER
+        elif disposition is LeaseDisposition.UNHELD:
+            kind = AcquisitionKind.FRESH
+        else:
+            kind = AcquisitionKind.CONTINUED
         changing_holder = observed.holder_identity != owner.holder_identity
         transitions = observed.lease_transitions or 0
         if changing_holder:
             transitions += 1
         acquire_time = (
             current_time
-            if disposition in (LeaseDisposition.UNHELD, LeaseDisposition.EXPIRED)
+            if disposition is LeaseDisposition.UNHELD or takeover
             else observed.acquire_time or current_time
         )
         renew_time = (
@@ -491,6 +539,7 @@ class KubernetesLeaseStore:
             or updated.lease_transitions != transitions
         ):
             raise LeaseError(LeaseErrorCode.READ_AFTER_WRITE_MISMATCH)
+        self._clear_foreign_window()
         return LeaseAcquisition(kind, updated)
 
     def renew(
@@ -500,7 +549,7 @@ class KubernetesLeaseStore:
         observed = self.observe()
         if observed.revision.uid != expected.revision.uid:
             raise LeaseError(LeaseErrorCode.OWNERSHIP_LOST)
-        if classify_lease(observed, owner, now=current_time) is not LeaseDisposition.HELD_BY_SELF:
+        if classify_lease(observed, owner) is not LeaseDisposition.HELD_BY_SELF:
             raise LeaseError(LeaseErrorCode.OWNERSHIP_LOST)
         acquire_time = observed.acquire_time or current_time
         renew_time = max(current_time, observed.renew_time or current_time)
@@ -525,11 +574,11 @@ class KubernetesLeaseStore:
     def release(
         self, expected: LeaseObservation, owner: ExecutionOwner, *, now: datetime,
     ) -> LeaseObservation:
-        current_time = _utc(now)
+        _utc(now)
         observed = self.observe()
         if observed.revision.uid != expected.revision.uid:
             raise LeaseError(LeaseErrorCode.OWNERSHIP_LOST)
-        if classify_lease(observed, owner, now=current_time) is not LeaseDisposition.HELD_BY_SELF:
+        if classify_lease(observed, owner) is not LeaseDisposition.HELD_BY_SELF:
             raise LeaseError(LeaseErrorCode.OWNERSHIP_LOST)
         updated = self._patch(observed.revision, {
             "holderIdentity": None,
@@ -692,10 +741,17 @@ class LeaseOwnership:
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join()
+        may_release = False
+        if release:
+            try:
+                self.assert_owned()
+            except LeaseError:
+                pass
+            else:
+                may_release = True
         with self._lock:
-            loss = self._loss
             expected = self._observation
-        if release and loss is None:
+        if may_release:
             try:
                 self._store.release(expected, self._owner, now=self._wall_clock())
             except LeaseError as exc:

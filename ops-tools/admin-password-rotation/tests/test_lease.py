@@ -12,6 +12,7 @@ import pytest
 
 import admin_password_rotation.lease as lease_module
 
+from admin_password_rotation.errors import ReadError
 from admin_password_rotation.lease import (
     AcquisitionKind, ExecutionOwner, KubernetesApiLeaseTransport,
     KubernetesLeaseStore, LeaseDisposition, LeaseError,
@@ -25,6 +26,7 @@ TIMING = LeaseTiming()
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 E1 = ExecutionOwner(UUID("11111111-1111-4111-8111-111111111111"))
 E2 = ExecutionOwner(UUID("22222222-2222-4222-8222-222222222222"))
+E3 = ExecutionOwner(UUID("33333333-3333-4333-8333-333333333333"))
 SENTINEL = "DO-NOT-EXPOSE-LEASE-DETAIL"
 
 
@@ -115,8 +117,28 @@ def object_dict(value: object) -> dict[str, object]:
     return cast(dict[str, object], raw)
 
 
-def store(transport: MemoryLeaseTransport) -> KubernetesLeaseStore:
-    return KubernetesLeaseStore(REFERENCE, TIMING, transport)
+@dataclass
+class FakeClock:
+    monotonic_value: float = 100.0
+    wall_value: datetime = NOW
+
+    def monotonic(self) -> float:
+        return self.monotonic_value
+
+    def wall(self) -> datetime:
+        return self.wall_value
+
+    def advance(self, seconds: float) -> None:
+        self.monotonic_value += seconds
+        self.wall_value += timedelta(seconds=seconds)
+
+
+def store(
+    transport: MemoryLeaseTransport, *, monotonic: Callable[[], float] | None = None,
+) -> KubernetesLeaseStore:
+    if monotonic is None:
+        return KubernetesLeaseStore(REFERENCE, TIMING, transport)
+    return KubernetesLeaseStore(REFERENCE, TIMING, transport, monotonic=monotonic)
 
 
 def held_resource(
@@ -157,14 +179,18 @@ def test_timing_rejects_invalid_relationship(values: tuple[int, float, float]) -
         (lease_resource(), E1, LeaseDisposition.UNHELD),
         (held_resource(E1), E1, LeaseDisposition.HELD_BY_SELF),
         (held_resource(E1), E2, LeaseDisposition.HELD_BY_ANOTHER),
-        (held_resource(E1, renew_time=NOW - timedelta(seconds=121)), E2, LeaseDisposition.EXPIRED),
+        (
+            held_resource(E1, renew_time=NOW - timedelta(days=1)),
+            E2,
+            LeaseDisposition.HELD_BY_ANOTHER,
+        ),
     ],
 )
 def test_observation_classification(
     resource: dict[str, object], owner: ExecutionOwner, expected: LeaseDisposition,
 ) -> None:
     observed = store(MemoryLeaseTransport(resource)).observe()
-    assert classify_lease(observed, owner, now=NOW) is expected
+    assert classify_lease(observed, owner) is expected
 
 
 @pytest.mark.parametrize(
@@ -215,10 +241,11 @@ def test_fresh_acquisition_sets_owner_times_duration_and_revision() -> None:
     assert acquired.observation.revision.resource_version == "11"
 
 
-def test_nonexpired_other_owner_blocks_without_mutation() -> None:
-    transport = MemoryLeaseTransport(held_resource(E1))
+def test_foreign_wall_clock_skew_does_not_allow_immediate_takeover() -> None:
+    clock = FakeClock(wall_value=NOW + timedelta(minutes=10))
+    transport = MemoryLeaseTransport(held_resource(E1, renew_time=NOW))
     with pytest.raises(LeaseError) as raised:
-        store(transport).acquire(E2, now=NOW)
+        store(transport, monotonic=clock.monotonic).acquire(E2, now=clock.wall())
     assert raised.value.kind is LeaseErrorCode.HELD_BY_ANOTHER
     assert transport.patch_calls == []
 
@@ -240,15 +267,47 @@ def test_future_observed_renewal_is_treated_as_held_and_not_moved_backward() -> 
     assert acquired.observation.lease_transitions == 2
 
 
-def test_expired_takeover_is_explicit_and_increments_transition() -> None:
-    transport = MemoryLeaseTransport(
-        held_resource(E1, renew_time=NOW - timedelta(seconds=121)),
-    )
-    acquired = store(transport).acquire(E2, now=NOW)
+def test_unchanged_foreign_record_takeover_is_explicit_and_increments_transition() -> None:
+    clock = FakeClock(monotonic_value=0)
+    transport = MemoryLeaseTransport(held_resource(E1))
+    lease_store = store(transport, monotonic=clock.monotonic)
+    with pytest.raises(LeaseError) as first:
+        lease_store.acquire(E2, now=clock.wall())
+    assert first.value.kind is LeaseErrorCode.HELD_BY_ANOTHER
+    clock.advance(119)
+    with pytest.raises(LeaseError) as early:
+        lease_store.acquire(E2, now=clock.wall())
+    assert early.value.kind is LeaseErrorCode.HELD_BY_ANOTHER
+    clock.advance(1)
+    acquired = lease_store.acquire(E2, now=clock.wall())
     assert acquired.kind is AcquisitionKind.EXPIRED_TAKEOVER
     assert acquired.requires_recovery_gate
     assert acquired.observation.holder_identity == E2.holder_identity
     assert acquired.observation.lease_transitions == 3
+
+
+@pytest.mark.parametrize("change", ["resource_version", "holder", "uid"])
+def test_foreign_lease_record_change_resets_takeover_window(change: str) -> None:
+    clock = FakeClock(monotonic_value=0)
+    transport = MemoryLeaseTransport(held_resource(E1, resource_version="10"))
+    lease_store = store(transport, monotonic=clock.monotonic)
+    with pytest.raises(LeaseError):
+        lease_store.acquire(E2, now=clock.wall())
+    clock.advance(100)
+    if change == "resource_version":
+        transport.resource = held_resource(E1, resource_version="11")
+    elif change == "holder":
+        transport.resource = held_resource(E3, resource_version="11")
+    else:
+        transport.resource = held_resource(E1, uid="replacement", resource_version="1")
+    with pytest.raises(LeaseError) as changed:
+        lease_store.acquire(E2, now=clock.wall())
+    assert changed.value.kind is LeaseErrorCode.HELD_BY_ANOTHER
+    clock.advance(50)
+    with pytest.raises(LeaseError) as too_early:
+        lease_store.acquire(E2, now=clock.wall())
+    assert too_early.value.kind is LeaseErrorCode.HELD_BY_ANOTHER
+    assert transport.patch_calls == []
 
 
 def test_concurrent_acquisition_race_does_not_overwrite_winner() -> None:
@@ -262,6 +321,24 @@ def test_concurrent_acquisition_race_does_not_overwrite_winner() -> None:
     assert object_dict(transport.resource["spec"])["holderIdentity"] == E1.holder_identity
 
 
+def test_foreign_renewal_after_takeover_eligibility_wins_patch_race() -> None:
+    clock = FakeClock(monotonic_value=0)
+    transport = MemoryLeaseTransport(held_resource(E1, resource_version="10"))
+    lease_store = store(transport, monotonic=clock.monotonic)
+    with pytest.raises(LeaseError):
+        lease_store.acquire(E2, now=clock.wall())
+    clock.advance(120)
+
+    def e1_renews(current: MemoryLeaseTransport) -> None:
+        current.resource = held_resource(E1, resource_version="11")
+
+    transport.before_patch = e1_renews
+    with pytest.raises(LeaseError) as raised:
+        lease_store.acquire(E2, now=clock.wall())
+    assert raised.value.kind is LeaseErrorCode.CONFLICT
+    assert object_dict(transport.resource["spec"])["holderIdentity"] == E1.holder_identity
+
+
 def test_renewal_advances_time_and_revision_without_transition() -> None:
     transport = MemoryLeaseTransport(held_resource(E1, renew_time=NOW - timedelta(seconds=20)))
     lease_store = store(transport)
@@ -271,22 +348,6 @@ def test_renewal_advances_time_and_revision_without_transition() -> None:
     assert renewed.renew_time == NOW
     assert renewed.lease_transitions == 2
     assert renewed.revision.resource_version == "11"
-
-
-@dataclass
-class FakeClock:
-    monotonic_value: float = 100.0
-    wall_value: datetime = NOW
-
-    def monotonic(self) -> float:
-        return self.monotonic_value
-
-    def wall(self) -> datetime:
-        return self.wall_value
-
-    def advance(self, seconds: float) -> None:
-        self.monotonic_value += seconds
-        self.wall_value += timedelta(seconds=seconds)
 
 
 def ownership(
@@ -389,6 +450,18 @@ def test_current_owner_releases_but_lost_owner_never_writes_cleanup() -> None:
     lost_guard.close()
     assert len(second_transport.patch_calls) == writes_before_close
     assert object_dict(second_transport.resource["spec"])["holderIdentity"] == E2.holder_identity
+
+
+def test_close_does_not_release_after_local_freshness_deadline() -> None:
+    clock = FakeClock()
+    transport = MemoryLeaseTransport()
+    guard = ownership(transport, clock)
+    writes_before_close = len(transport.patch_calls)
+    clock.advance(TIMING.renewal_deadline_seconds)
+    guard.close(release=True)
+    assert len(transport.patch_calls) == writes_before_close
+    assert guard.loss_reason is LeaseErrorCode.OWNERSHIP_UNCERTAIN
+    assert object_dict(transport.resource["spec"])["holderIdentity"] == E1.holder_identity
 
 
 def test_release_race_does_not_clear_new_owner() -> None:
@@ -536,6 +609,23 @@ def test_api_adapter_reads_through_coordination_v1_namespaced_lease() -> None:
     assert api.read_calls == [(
         "keystone-admin-rotation", "openstack", {"_request_timeout": 7},
     )]
+
+
+def test_api_adapter_default_timeout_is_below_renewal_deadline() -> None:
+    api = RecordingLeaseApi()
+    KubernetesApiLeaseTransport(api, IdentitySerializer()).read(REFERENCE)
+    assert api.read_calls == [(
+        "keystone-admin-rotation", "openstack", {"_request_timeout": 30.0},
+    )]
+    assert 30.0 < TIMING.renewal_deadline_seconds
+
+
+def test_api_adapter_rejects_timeout_at_renewal_deadline() -> None:
+    with pytest.raises(ReadError, match="invalid_timeout"):
+        KubernetesApiLeaseTransport(
+            RecordingLeaseApi(), IdentitySerializer(),
+            timeout=TIMING.renewal_deadline_seconds, timing=TIMING,
+        )
 
 
 def test_api_adapter_factory_requests_coordination_v1_api(

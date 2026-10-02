@@ -186,20 +186,21 @@ Acquisition, renewal and release use atomic JSON Patch tests for both values and
 change only Lease ownership fields. Lease observations and revisions are transient
 and are never serialized into schema-v2 `state.json`.
 
-The defaults are a 120-second Lease duration, 20-second renewal interval and
-60-second renewal deadline. Kubernetes UTC timestamps establish the observed
-Lease expiry; a monotonic local clock establishes renewal freshness. A dedicated
-watchdog renews independently of future workflow code. Holder or UID changes,
-ambiguous renewals, malformed observations and renewal-deadline expiry make local
-ownership loss/uncertainty sticky for that execution. `assert_owned()` then fails
-before future consequential effects. A lost execution stops renewal and never
-issues a stale cleanup write. Normal release first reobserves ownership and uses
-the same conditional patch discipline.
+The defaults are a 120-second Lease duration, 20-second renewal interval,
+60-second renewal deadline and 30-second API-call timeout. A dedicated watchdog
+renews independently of future workflow code. Holder or UID changes, ambiguous
+renewals, malformed observations and renewal-deadline expiry make local ownership
+loss/uncertainty sticky for that execution. `assert_owned()` then fails before
+future consequential effects. A lost execution stops renewal and never issues a
+stale cleanup write. Normal release requires locally fresh ownership, then
+reobserves it and uses the same conditional patch discipline.
 
-An observed renewal timestamp in the future is treated as held and is never moved
-backward by this client. As with Kubernetes Lease coordination generally, hosts
-still require reasonably synchronized wall clocks; uncertainty is resolved by
-stopping mutation attempts, not by treating skew as permission to take over.
+Lease UTC timestamps are parsed and retained but are not assumed to be synchronized
+with another execution's clock. Foreign-owner takeover eligibility instead requires
+the same UID, holder identity and `resourceVersion` to remain unchanged for the
+observed `leaseDurationSeconds` according to a local monotonic clock. Any record
+change resets that local observation window. This contender-side timer is separate
+from the owner-side monotonic renewal-freshness timer used by `assert_owned()`.
 
 Fresh acquisition, continued same-execution ownership and expired-Lease takeover
 are distinct results. An expired takeover makes the new execution the current
