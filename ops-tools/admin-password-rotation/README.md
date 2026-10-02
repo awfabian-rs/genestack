@@ -19,6 +19,12 @@ uses `httpx`. The separate Slice 1 live planning adapter runs only `kubectl get
 secrets -o json` in an explicitly named context. Offline fixture mode does not
 invoke kubectl.
 
+Slice 3A PasswordSafe support is limited to Rackspace Identity token acquisition,
+current-credential JSON reads and password-only JSON updates. Historical
+PasswordSafe retrieval is not implemented in Slice 3A. Exact old-A history remains
+a deferred exceptional recovery capability from the implementation brief and will
+be implemented only if and when the later A-recovery slice requires it.
+
 The Lease defaults are a 120-second duration, 20-second renewal interval and
 60-second renewal deadline. This is cooperative ownership, not hard fencing:
 expiry or takeover does not prove that an old process cannot reach an external

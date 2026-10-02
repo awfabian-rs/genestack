@@ -3,14 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from typing import Protocol
 from urllib.parse import quote
 
 from .external_http import (
-    MAX_HTML_RESPONSE_BYTES, ExternalClientError, ExternalErrorCode, HttpRequest,
-    HttpResponse, HttpTransport, HttpTransportError, HttpTransportErrorCode,
-    json_request_body, json_response_object, secret_text,
+    ExternalClientError, ExternalErrorCode, HttpRequest, HttpResponse, HttpTransport,
+    HttpTransportError, HttpTransportErrorCode, json_request_body,
+    json_response_object, secret_text,
 )
 from .errors import ReadError
 from .model import SecretValue
@@ -46,11 +45,6 @@ class PasswordSafeClient(Protocol):
         self, *, access: IdentityAccess, project_id: int, credential_id: int,
         new_password: SecretValue,
     ) -> None: ...
-
-    def get_exact_history_version(
-        self, *, access: IdentityAccess, project_id: int, credential_id: int,
-        version: int,
-    ) -> PasswordSafeCredential: ...
 
 
 def _timestamp(value: object) -> datetime:
@@ -157,132 +151,6 @@ class HttpRackspaceIdentityClient:
         )
 
 
-def _empty_strings() -> list[str]:
-    return []
-
-
-@dataclass
-class _HistoryRow:
-    project_id: str
-    credential_id: str
-    version: str
-    username_parts: list[str] = field(default_factory=_empty_strings)
-    password: str | None = field(default=None, repr=False)
-    capturing_username: bool = False
-    malformed: bool = False
-
-
-class _CredentialHistoryParser(HTMLParser):
-    """Parse the isolated, explicit credential-history row representation."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.rows: list[_HistoryRow] = []
-        self.current: _HistoryRow | None = None
-        self.malformed = False
-
-    @staticmethod
-    def _attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str | None]:
-        result: dict[str, str | None] = {}
-        for name, value in attrs:
-            if name in result:
-                return {}
-            result[name] = value
-        return result
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = self._attributes(attrs)
-        if tag == "tr" and "data-version" in values:
-            if self.current is not None:
-                self.malformed = True
-                return
-            project = values.get("data-project-id")
-            credential = values.get("data-credential-id")
-            version = values.get("data-version")
-            if project is None or credential is None or version is None:
-                self.malformed = True
-                return
-            self.current = _HistoryRow(project, credential, version)
-            return
-        if self.current is None:
-            return
-        field_name = values.get("data-field")
-        if field_name == "username":
-            if self.current.capturing_username:
-                self.current.malformed = True
-            self.current.capturing_username = True
-        if field_name == "password":
-            password = values.get("value")
-            if tag != "input" or password is None or self.current.password is not None:
-                self.current.malformed = True
-            else:
-                self.current.password = password
-
-    def handle_endtag(self, tag: str) -> None:
-        if self.current is None:
-            return
-        if self.current.capturing_username and tag in ("td", "span"):
-            self.current.capturing_username = False
-        if tag == "tr":
-            self.rows.append(self.current)
-            self.current = None
-
-    def handle_data(self, data: str) -> None:
-        if self.current is not None and self.current.capturing_username:
-            self.current.username_parts.append(data)
-
-    def close(self) -> None:
-        super().close()
-        if self.current is not None:
-            self.malformed = True
-
-
-def parse_passwordsafe_history(
-    content: bytes, *, project_id: int, credential_id: int, version: int,
-) -> PasswordSafeCredential:
-    """Return one exact historical version without exposing other page secrets."""
-    _path_id(project_id, "PasswordSafe project ID")
-    _path_id(credential_id, "PasswordSafe credential ID")
-    _path_id(version, "PasswordSafe credential version")
-    if len(content) > MAX_HTML_RESPONSE_BYTES:
-        raise ExternalClientError(ExternalErrorCode.MALFORMED_RESPONSE)
-    try:
-        text = content.decode("utf-8")
-        parser = _CredentialHistoryParser()
-        parser.feed(text)
-        parser.close()
-        if parser.malformed or not parser.rows:
-            raise ExternalClientError(ExternalErrorCode.MALFORMED_RESPONSE)
-        matches: list[PasswordSafeCredential] = []
-        for row in parser.rows:
-            row_project = int(row.project_id)
-            row_credential = int(row.credential_id)
-            row_version = int(row.version)
-            username = "".join(row.username_parts).strip()
-            if (
-                row.malformed or row_project <= 0 or row_credential <= 0 or row_version <= 0
-                or not username or row.password is None or not row.password
-            ):
-                raise ExternalClientError(ExternalErrorCode.MALFORMED_RESPONSE)
-            if (
-                row_project == project_id and row_credential == credential_id
-                and row_version == version
-            ):
-                matches.append(PasswordSafeCredential(
-                    row_project, row_credential, username, row_version,
-                    SecretValue(row.password.encode("utf-8")),
-                ))
-        if not matches:
-            raise ExternalClientError(ExternalErrorCode.NOT_FOUND)
-        if len(matches) != 1:
-            raise ExternalClientError(ExternalErrorCode.MALFORMED_RESPONSE)
-        return matches[0]
-    except ExternalClientError:
-        raise
-    except (UnicodeError, ValueError, RecursionError):
-        raise ExternalClientError(ExternalErrorCode.MALFORMED_RESPONSE) from None
-
-
 class HttpPasswordSafeClient:
     def __init__(self, transport: HttpTransport) -> None:
         self._transport = transport
@@ -337,28 +205,6 @@ class HttpPasswordSafeClient:
         if response.status_code != 204:
             raise _service_error(response)
 
-    def get_exact_history_version(
-        self, *, access: IdentityAccess, project_id: int, credential_id: int,
-        version: int,
-    ) -> PasswordSafeCredential:
-        path = _passwordsafe_path(project_id, credential_id) + "/history"
-        try:
-            response = self._transport.send(HttpRequest(
-                "GET", path,
-                _passwordsafe_headers(access, accept="text/html"),
-            ))
-        except HttpTransportError:
-            raise ExternalClientError(ExternalErrorCode.DEPENDENCY_FAILURE) from None
-        if response.status_code != 200:
-            raise _service_error(response)
-        return parse_passwordsafe_history(
-            response.content,
-            project_id=project_id,
-            credential_id=credential_id,
-            version=version,
-        )
-
-
 class FakeRackspaceIdentityClient:
     def __init__(self, username: str, password: SecretValue, access: IdentityAccess) -> None:
         self._username = username
@@ -375,11 +221,10 @@ class FakeRackspaceIdentityClient:
 
 
 class FakePasswordSafeClient:
-    """Behavioral current/history store for future recovery tests."""
+    """Behavioral current-credential store for future runner tests."""
 
     def __init__(self) -> None:
         self._records: dict[tuple[int, int], PasswordSafeCredential] = {}
-        self._history: dict[tuple[int, int, int], PasswordSafeCredential] = {}
         self.ambiguous_next_update_apply: bool | None = None
 
     def add(self, credential: PasswordSafeCredential) -> None:
@@ -410,23 +255,9 @@ class FakePasswordSafeClient:
         old = self._records[key]
         apply = self.ambiguous_next_update_apply
         if apply is None or apply:
-            self._history[(project_id, credential_id, old.version)] = old
             self._records[key] = PasswordSafeCredential(
                 project_id, credential_id, old.username, old.version + 1, new_password,
             )
         if apply is not None:
             self.ambiguous_next_update_apply = None
             raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS)
-
-    def get_exact_history_version(
-        self, *, access: IdentityAccess, project_id: int, credential_id: int,
-        version: int,
-    ) -> PasswordSafeCredential:
-        del access
-        key = (project_id, credential_id, version)
-        if key not in self._history:
-            current = self._records.get((project_id, credential_id))
-            if current is not None and current.version == version:
-                return current
-            raise ExternalClientError(ExternalErrorCode.NOT_FOUND)
-        return self._history[key]

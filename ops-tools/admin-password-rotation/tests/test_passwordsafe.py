@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -20,7 +19,6 @@ from admin_password_rotation.passwordsafe import (
     HttpRackspaceIdentityClient,
     IdentityAccess,
     PasswordSafeCredential,
-    parse_passwordsafe_history,
 )
 
 IDENTITY_PASSWORD = "IDENTITY_PASSWORD_SENTINEL"
@@ -28,8 +26,6 @@ IDENTITY_TOKEN = "IDENTITY_TOKEN_SENTINEL"
 PASSWORDSAFE_TOKEN = "PASSWORDSAFE_TOKEN_SENTINEL"
 CURRENT_PASSWORD = "ADMIN_SECRET_SENTINEL"
 NEW_PASSWORD = "BREAKGLASS_SECRET_SENTINEL"
-HISTORICAL_PASSWORD = "HISTORICAL_SECRET_SENTINEL"
-FIXTURE = Path(__file__).parent / "fixtures" / "passwordsafe-history.html"
 
 
 def response(status: int, value: object | None = None) -> HttpResponse:
@@ -235,65 +231,7 @@ def test_external_http_error_does_not_echo_response_content() -> None:
     assert PASSWORDSAFE_TOKEN not in visible
 
 
-def test_fixture_history_returns_exact_requested_version_not_second_entry() -> None:
-    result = parse_passwordsafe_history(
-        FIXTURE.read_bytes(), project_id=101, credential_id=202, version=7,
-    )
-    assert result.version == 7
-    assert result.password == SecretValue(b"fixture-history-secret-7")
-    assert "fixture-history-secret-7" not in repr(result) + str(result)
-
-
-def history_row(version: str, *, password: str = HISTORICAL_PASSWORD) -> str:
-    return (
-        f'<tr data-project-id="101" data-credential-id="202" data-version="{version}">'
-        '<td data-field="username">admin</td>'
-        f'<td><input data-field="password" value="{password}"></td></tr>'
-    )
-
-
-@pytest.mark.parametrize(
-    ("html", "version", "kind"),
-    [
-        (history_row("8"), 7, ExternalErrorCode.NOT_FOUND),
-        (history_row("7") + history_row("7"), 7, ExternalErrorCode.MALFORMED_RESPONSE),
-        (
-            '<tr data-project-id="101" data-credential-id="202" data-version="7">'
-            '<td data-field="username">admin</td><td data-field="password">secret</td></tr>',
-            7,
-            ExternalErrorCode.MALFORMED_RESPONSE,
-        ),
-        (history_row("not-a-version"), 7, ExternalErrorCode.MALFORMED_RESPONSE),
-    ],
-)
-def test_history_parser_rejects_absent_duplicate_and_malformed_versions(
-    html: str, version: int, kind: ExternalErrorCode,
-) -> None:
-    with pytest.raises(ExternalClientError) as raised:
-        parse_passwordsafe_history(
-            html.encode(), project_id=101, credential_id=202, version=version,
-        )
-    assert raised.value.kind is kind
-    assert HISTORICAL_PASSWORD not in str(raised.value) + repr(raised.value)
-
-
-def test_history_http_path_is_explicit_and_normal_get_does_not_fetch_it() -> None:
-    transport = FakeHttpTransport()
-    transport.queue_response(response(200, current_document()))
-    transport.queue_response(HttpResponse(200, (), FIXTURE.read_bytes()))
-    client = HttpPasswordSafeClient(transport)
-    client.get_current(access=access(), project_id=101, credential_id=202)
-    historical = client.get_exact_history_version(
-        access=access(), project_id=101, credential_id=202, version=8,
-    )
-    assert transport.requests[0].path == "/projects/101/credentials/202"
-    assert header(transport.requests[0].headers, "Accept") == "application/json"
-    assert transport.requests[1].path == "/projects/101/credentials/202/history"
-    assert header(transport.requests[1].headers, "Accept") == "text/html"
-    assert historical.version == 8
-
-
-def test_behavioral_fake_supports_versioning_history_and_ambiguous_apply() -> None:
+def test_behavioral_fake_supports_version_advancement_and_ambiguous_apply() -> None:
     fake = FakePasswordSafeClient()
     fake.add(PasswordSafeCredential(
         101, 202, "admin", 9, SecretValue(CURRENT_PASSWORD.encode()),
@@ -306,9 +244,5 @@ def test_behavioral_fake_supports_versioning_history_and_ambiguous_apply() -> No
         )
     assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
     current = fake.get_current(access=access(), project_id=101, credential_id=202)
-    old = fake.get_exact_history_version(
-        access=access(), project_id=101, credential_id=202, version=9,
-    )
     assert current.version == 10
     assert current.password == SecretValue(NEW_PASSWORD.encode())
-    assert old.password == SecretValue(CURRENT_PASSWORD.encode())

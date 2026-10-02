@@ -19,7 +19,6 @@ from .validation import object_mapping
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
-MAX_HTML_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 class ExternalErrorCode(Enum):

@@ -259,7 +259,7 @@ class HttpKeystoneClient:
         management_token: SecretValue,
     ) -> None:
         self._mutation(
-            _user_path(user_id),
+            user_id,
             {"user": {"password": secret_text(new_password)}},
             management_token,
         )
@@ -305,17 +305,18 @@ class HttpKeystoneClient:
         self, *, user_id: str, value: bool, management_token: SecretValue,
     ) -> None:
         self._mutation(
-            _user_path(user_id),
+            user_id,
             {"user": {"options": {"ignore_lockout_failure_attempts": value}}},
             management_token,
         )
 
     def _mutation(
-        self, path: str, body: object, management_token: SecretValue,
+        self, user_id: str, body: object, management_token: SecretValue,
     ) -> None:
         try:
             response = self._transport.send(HttpRequest(
-                "PATCH", path, _management_headers(management_token, mutation=True),
+                "PATCH", _user_path(user_id),
+                _management_headers(management_token, mutation=True),
                 json_request_body(body), mutation=True,
             ))
         except HttpTransportError as exc:
@@ -325,8 +326,13 @@ class HttpKeystoneClient:
                 else ExternalErrorCode.DEPENDENCY_FAILURE
             )
             raise ExternalClientError(kind) from None
-        if response.status_code != 204:
+        if response.status_code != 200:
             raise _service_error(response)
+        root = json_response_object(response)
+        user = _mapping(root.get("user"))
+        returned_id = _string(user.get("id"))
+        if returned_id != user_id:
+            raise ExternalClientError(ExternalErrorCode.RECORD_MISMATCH)
 
 
 @dataclass

@@ -22,7 +22,7 @@ rotation behavior remains unimplemented.
 | `lease.py` | Validated Lease observation, conditional ownership operations and sticky local renewal guard. |
 | `external_http.py` | Bounded, secret-safe direct HTTP transport shared by external credential adapters. |
 | `keystone.py` | Typed Keystone v3 authentication, exact-user password update and user-option operations. |
-| `passwordsafe.py` | Rackspace Identity authentication and PasswordSafe current/update/exact-history operations. |
+| `passwordsafe.py` | Rackspace Identity authentication and PasswordSafe current-credential read/update operations. |
 | `passwords.py` | Cryptographically secure administrative-password generation. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
@@ -230,16 +230,20 @@ remain indeterminate. Success includes the observed user, domain, project, roles
 and expiry so future policy can validate identity and scope rather than treating
 token issuance alone as sufficient. Administrative password updates address the
 recorded user ID, and lockout-option updates patch only
-`ignore_lockout_failure_attempts`.
+`ignore_lockout_failure_attempts`. Both operations use `PATCH /v3/users/{user_id}`
+and require HTTP 200 with a response `user.id` matching the requested ID. The
+returned representation proves only that Keystone identified the intended resource;
+fresh authentication is still required to observe whether an intended password works.
 
 Rackspace Identity Internal v2 exchanges the configured AD service-account
 credential for a redacted token used as PasswordSafe `X-Auth-Token`. Normal
 PasswordSafe reads use JSON. Password updates PATCH only the password, and HTTP
 204 is merely acceptance of the request, not proof of durable completion. Future
 workflow must use a separate GET to verify the observed credential and version.
-Exact historical-version retrieval is an isolated exceptional path that explicitly
-requests and structurally parses the HTML history representation; normal current
-reads never fetch history.
+Historical PasswordSafe retrieval is not implemented in Slice 3A. Exact old-A
+history remains a deferred exceptional recovery capability from the implementation
+brief and will be implemented only if and when the later A-recovery slice
+demonstrates that it is required.
 
 Replacement administrative passwords are exactly 32 characters from ASCII
 letters, digits and underscore, selected with Python's cryptographic `secrets`

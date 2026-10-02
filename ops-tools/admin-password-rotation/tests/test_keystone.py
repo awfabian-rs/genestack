@@ -60,6 +60,10 @@ def auth_document(*, user_id: str = "admin-user") -> dict[str, object]:
     }
 
 
+def user_update_document(user_id: object = "admin-user") -> dict[str, object]:
+    return {"user": {"id": user_id}}
+
+
 def auth_request() -> KeystonePasswordAuthRequest:
     return KeystonePasswordAuthRequest(
         "admin", "default-domain", "admin-project", SecretValue(PASSWORD.encode()),
@@ -191,7 +195,7 @@ def test_auth_secrets_are_redacted_from_models_and_request_repr() -> None:
 
 def test_administrative_password_reset_targets_exact_user_id() -> None:
     transport = FakeHttpTransport()
-    transport.queue_response(response(204))
+    transport.queue_response(response(200, user_update_document("user/id")))
     client = HttpKeystoneClient(transport)
     client.set_user_password(
         user_id="user/id", new_password=SecretValue(PASSWORD.encode()),
@@ -243,7 +247,7 @@ def test_get_user_rejects_malformed_lockout_option(bad_option: object) -> None:
 
 def test_lockout_patch_changes_only_requested_option() -> None:
     transport = FakeHttpTransport()
-    transport.queue_response(response(204))
+    transport.queue_response(response(200, user_update_document()))
     HttpKeystoneClient(transport).set_ignore_lockout_failure_attempts(
         user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
     )
@@ -252,6 +256,44 @@ def test_lockout_patch_changes_only_requested_option() -> None:
     assert decoded_body(request.body) == {
         "user": {"options": {"ignore_lockout_failure_attempts": True}},
     }
+
+
+@pytest.mark.parametrize(
+    ("mutation_response", "kind"),
+    [
+        (
+            response(200, user_update_document("different-user")),
+            ExternalErrorCode.RECORD_MISMATCH,
+        ),
+        (response(200, {}), ExternalErrorCode.MALFORMED_RESPONSE),
+        (response(200, user_update_document(None)), ExternalErrorCode.MALFORMED_RESPONSE),
+        (response(200, user_update_document("")), ExternalErrorCode.MALFORMED_RESPONSE),
+        (response(204), ExternalErrorCode.UNEXPECTED_RESPONSE),
+        (response(403), ExternalErrorCode.AUTHORIZATION_FAILURE),
+        (response(500), ExternalErrorCode.DEPENDENCY_FAILURE),
+    ],
+)
+def test_password_mutation_rejects_invalid_or_unsuccessful_responses(
+    mutation_response: HttpResponse, kind: ExternalErrorCode,
+) -> None:
+    transport = FakeHttpTransport()
+    transport.queue_response(mutation_response)
+    with pytest.raises(ExternalClientError) as raised:
+        HttpKeystoneClient(transport).set_user_password(
+            user_id="admin-user", new_password=SecretValue(PASSWORD.encode()),
+            management_token=MANAGEMENT_TOKEN,
+        )
+    assert raised.value.kind is kind
+
+
+def test_lockout_mutation_rejects_204_as_unexpected() -> None:
+    transport = FakeHttpTransport()
+    transport.queue_response(response(204))
+    with pytest.raises(ExternalClientError) as raised:
+        HttpKeystoneClient(transport).set_ignore_lockout_failure_attempts(
+            user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
+        )
+    assert raised.value.kind is ExternalErrorCode.UNEXPECTED_RESPONSE
 
 
 def test_mutation_timeout_is_ambiguous_and_secret_safe() -> None:
@@ -266,6 +308,16 @@ def test_mutation_timeout_is_ambiguous_and_secret_safe() -> None:
     visible = str(raised.value) + repr(raised.value)
     assert PASSWORD not in visible
     assert "MANAGEMENT_TOKEN_SENTINEL" not in visible
+
+
+def test_lockout_mutation_timeout_is_ambiguous() -> None:
+    transport = FakeHttpTransport()
+    transport.queue_error(HttpTransportErrorCode.MUTATION_AMBIGUOUS)
+    with pytest.raises(ExternalClientError) as raised:
+        HttpKeystoneClient(transport).set_ignore_lockout_failure_attempts(
+            user_id="admin-user", value=True, management_token=MANAGEMENT_TOKEN,
+        )
+    assert raised.value.kind is ExternalErrorCode.MUTATION_AMBIGUOUS
 
 
 def test_behavioral_fake_changes_accepted_password_and_lockout_option() -> None:
