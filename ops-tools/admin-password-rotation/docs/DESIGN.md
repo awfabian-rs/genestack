@@ -2,10 +2,8 @@
 
 Status: Slices 1, 2A, 2B, 2C, and 3A are implemented.
 
-  No workflow currently invokes credential mutations.
-  PREPARE_B and ROTATE_A orchestration remain unimplemented.
-No workflow currently invokes credential mutations.
-PREPARE_B and ROTATE_A orchestration remain unimplemented.
+- No workflow currently invokes credential mutations.
+- PREPARE_B and ROTATE_A orchestration remain unimplemented.
 
 ## Boundaries
 

@@ -24,8 +24,6 @@ Before making architectural or workflow changes, read the project design sources
 
 When design sources conflict, use this precedence:
 
-  When design sources conflict, use this precedence:
-
 1. explicit current-task instructions and post-brief amendments documented here;
 2. the current implementation brief;
 3. the implementation specification where it is not superseded by the brief;
