@@ -135,6 +135,16 @@ bounded latest verification results. Future executors must follow:
 persist intent -> perform effect -> read/verify actual state -> record progress
 ```
 
+Each credential-mutation intent names one exact consequential effect rather than a
+broad rotation phase. Runtime-action progress is keyed by the normalized configured
+action ID, including actions such as Pod recreation that are not expressible as a
+Deployment or DaemonSet reference. This accommodates both `rollout_restart` and
+`recreate_pod` obligations without copying action definitions into state. The
+configuration digest binds those IDs to the same effective action definitions on
+resume. Lockout booleans explicitly represent Keystone's
+`ignore_lockout_failure_attempts` option; the normal stable value is `false`, while
+observed abnormal and transitional values remain representable.
+
 The state retains resolved Keystone object IDs so recovery does not silently adopt
 same-name replacements. Generated credential generations are represented only as
 `sha256:<64 lowercase hex>` over their exact UTF-8 bytes. Credential values, old

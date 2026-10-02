@@ -250,11 +250,14 @@ class TransactionStatus(Enum):
     COMPLETED = "completed"
 
 
-class CredentialMutationOperation(Enum):
-    PREPARE_B = "prepare_b"
-    SWITCH_TO_B = "switch_to_b"
-    ROTATE_A = "rotate_a"
-    SWITCH_TO_A = "switch_to_a"
+class CredentialMutationStep(Enum):
+    STAGE_B_PASSWORDSAFE = "stage_b_passwordsafe"
+    RESET_B_KEYSTONE = "reset_b_keystone"
+    PROPAGATE_TO_B = "propagate_to_b"
+    STAGE_A_BREEDER = "stage_a_breeder"
+    RESET_A_KEYSTONE = "reset_a_keystone"
+    UPDATE_A_PASSWORDSAFE = "update_a_passwordsafe"
+    PROPAGATE_TO_A = "propagate_to_a"
 
 
 class IntentEffectState(Enum):
@@ -342,7 +345,7 @@ class KubernetesMutationTarget:
 
 @dataclass(frozen=True)
 class CredentialMutationIntent:
-    operation: CredentialMutationOperation
+    step: CredentialMutationStep
     target: KubernetesMutationTarget | None
     affected_location_ids: tuple[str, ...]
     intended_generation: CredentialGeneration
@@ -353,7 +356,7 @@ class CredentialMutationIntent:
 
 @dataclass(frozen=True)
 class RuntimeActionProgress:
-    workload: WorkloadRef
+    action_id: str
     state: RuntimeActionState
 
 
@@ -371,10 +374,10 @@ class PropagationState:
 
 @dataclass(frozen=True)
 class LockoutState:
-    initial_normal_value: bool
+    initial_ignore_lockout_failure_attempts: bool
     suppression: LockoutChangeState
     restoration: LockoutChangeState
-    latest_observed_value: bool | None
+    latest_ignore_lockout_failure_attempts: bool | None
     restore_required: bool
 
 

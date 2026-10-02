@@ -15,12 +15,12 @@ from uuid import UUID
 from .errors import ReadError
 from .model import (
     STATE_SCHEMA_VERSION, CompletedOutcome, CompletedRequest, ConfigurationDigest,
-    CredentialGeneration, CredentialMutationIntent, CredentialMutationOperation,
+    CredentialGeneration, CredentialMutationIntent, CredentialMutationStep,
     EnvironmentIdentity, ExecutionIdentity, IntentEffectState, KubernetesMutationTarget,
     LockoutChangeState, LockoutState, PasswordSafeState, PersistentState, PodIdentity,
     PropagationState, PropagationWave, ResolvedKeystoneIdentities, RotationPhase,
     RotationTransaction, RuntimeActionProgress, RuntimeActionState, SafeErrorInfo,
-    TransactionStatus, VerificationResult, VerificationStatus, WorkloadKind, WorkloadRef,
+    TransactionStatus, VerificationResult, VerificationStatus,
 )
 from .validation import is_identifier, is_object_name, nonempty_string, object_list, object_mapping
 
@@ -29,6 +29,28 @@ MAX_COMPLETED_REQUESTS = 128
 MAX_VERIFICATION_RESULTS = 32
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z")
 _EnumType = TypeVar("_EnumType", bound=Enum)
+_B_GENERATION_STEPS = frozenset(
+    {
+        CredentialMutationStep.STAGE_B_PASSWORDSAFE,
+        CredentialMutationStep.RESET_B_KEYSTONE,
+        CredentialMutationStep.PROPAGATE_TO_B,
+    }
+)
+_A_GENERATION_STEPS = frozenset(
+    {
+        CredentialMutationStep.STAGE_A_BREEDER,
+        CredentialMutationStep.RESET_A_KEYSTONE,
+        CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+        CredentialMutationStep.PROPAGATE_TO_A,
+    }
+)
+_PROPAGATION_STEPS = frozenset(
+    {
+        CredentialMutationStep.PROPAGATE_TO_B,
+        CredentialMutationStep.PROPAGATE_TO_A,
+    }
+)
+_KUBERNETES_STEPS = _PROPAGATION_STEPS | {CredentialMutationStep.STAGE_A_BREEDER}
 
 
 def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -219,14 +241,14 @@ def _mutation_target(value: object) -> KubernetesMutationTarget:
 
 def _mutation_intent(value: object) -> CredentialMutationIntent:
     names = {
-        "operation", "target", "affected_location_ids", "intended_generation",
+        "step", "target", "affected_location_ids", "intended_generation",
         "effect_state", "effect_observed_at", "resulting_resource_version",
     }
     data = _fields(value, names)
     target_value = data["target"]
     observed_at_value = data["effect_observed_at"]
     result = CredentialMutationIntent(
-        operation=_enum(data["operation"], CredentialMutationOperation),
+        step=_enum(data["step"], CredentialMutationStep),
         target=None if target_value is None else _mutation_target(target_value),
         affected_location_ids=_identifiers(data["affected_location_ids"]),
         intended_generation=_generation(data["intended_generation"]),
@@ -234,34 +256,36 @@ def _mutation_intent(value: object) -> CredentialMutationIntent:
         effect_observed_at=None if observed_at_value is None else _timestamp(observed_at_value),
         resulting_resource_version=_optional_string(data["resulting_resource_version"]),
     )
-    if (result.target is None) != (not result.affected_location_ids):
-        raise ReadError("invalid_mutation_intent", "A Kubernetes mutation target and affected locations must be recorded together.")
+    if result.step in _KUBERNETES_STEPS and result.target is None:
+        raise ReadError("invalid_mutation_intent", "This mutation step requires a Kubernetes target.")
+    if result.step not in _KUBERNETES_STEPS and result.target is not None:
+        raise ReadError("invalid_mutation_intent", "This mutation step cannot have a Kubernetes target.")
+    if result.step in _PROPAGATION_STEPS and not result.affected_location_ids:
+        raise ReadError("invalid_mutation_intent", "A propagation step requires affected credential locations.")
+    if result.step not in _PROPAGATION_STEPS and result.affected_location_ids:
+        raise ReadError("invalid_mutation_intent", "Only a propagation step can have affected credential locations.")
     if result.effect_state is IntentEffectState.UNKNOWN and (
         result.effect_observed_at is not None or result.resulting_resource_version is not None
     ):
         raise ReadError("invalid_mutation_intent", "Mutation observation fields do not match the effect state.")
     if result.effect_state is IntentEffectState.OBSERVED and result.effect_observed_at is None:
         raise ReadError("invalid_mutation_intent", "Mutation observation fields do not match the effect state.")
-    if (result.target is None) != (result.resulting_resource_version is None):
-        if result.effect_state is IntentEffectState.OBSERVED:
-            raise ReadError("invalid_mutation_intent", "Mutation observation fields do not match the target type.")
+    if result.effect_state is IntentEffectState.OBSERVED and (
+        (result.target is None) != (result.resulting_resource_version is None)
+    ):
+        raise ReadError("invalid_mutation_intent", "Mutation observation fields do not match the target type.")
     return result
 
 
-def _workload(value: object) -> WorkloadRef:
-    data = _fields(value, {"kind", "name"})
-    return WorkloadRef(_enum(data["kind"], WorkloadKind), _object_name(data["name"]))
-
-
 def _runtime_action(value: object) -> RuntimeActionProgress:
-    data = _fields(value, {"workload", "state"})
-    return RuntimeActionProgress(_workload(data["workload"]), _enum(data["state"], RuntimeActionState))
+    data = _fields(value, {"action_id", "state"})
+    return RuntimeActionProgress(_identifier(data["action_id"]), _enum(data["state"], RuntimeActionState))
 
 
 def _wave(value: object) -> PropagationWave:
     data = _fields(value, {"applied_location_ids", "runtime_actions"})
     actions = tuple(_runtime_action(item) for item in object_list(data["runtime_actions"]))
-    if len({action.workload for action in actions}) != len(actions):
+    if len({action.action_id for action in actions}) != len(actions):
         raise ReadError("duplicate_runtime_action", "A propagation wave contains a duplicate runtime action.")
     return PropagationWave(_identifiers(data["applied_location_ids"]), actions)
 
@@ -273,14 +297,18 @@ def _propagation(value: object) -> PropagationState:
 
 def _lockout(value: object) -> LockoutState:
     data = _fields(value, {
-        "initial_normal_value", "suppression", "restoration", "latest_observed_value",
-        "restore_required",
+        "initial_ignore_lockout_failure_attempts", "suppression", "restoration",
+        "latest_ignore_lockout_failure_attempts", "restore_required",
     })
     return LockoutState(
-        initial_normal_value=_boolean(data["initial_normal_value"]),
+        initial_ignore_lockout_failure_attempts=_boolean(
+            data["initial_ignore_lockout_failure_attempts"]
+        ),
         suppression=_enum(data["suppression"], LockoutChangeState),
         restoration=_enum(data["restoration"], LockoutChangeState),
-        latest_observed_value=_optional_boolean(data["latest_observed_value"]),
+        latest_ignore_lockout_failure_attempts=_optional_boolean(
+            data["latest_ignore_lockout_failure_attempts"]
+        ),
         restore_required=_boolean(data["restore_required"]),
     )
 
@@ -344,6 +372,18 @@ def _transaction(value: object) -> RotationTransaction:
         raise ReadError("invalid_transaction_time", "Transaction update time precedes its creation time.")
     if result.new_a_sha256 is not None and result.new_a_sha256 == result.new_b_sha256:
         raise ReadError("invalid_credential_generations", "Admin and breakglass credential generations must differ.")
+    if result.credential_mutation_intent is not None:
+        if result.credential_mutation_intent.step in _B_GENERATION_STEPS:
+            expected_generation = result.new_b_sha256
+        elif result.credential_mutation_intent.step in _A_GENERATION_STEPS:
+            expected_generation = result.new_a_sha256
+        else:
+            raise ReadError("invalid_mutation_intent", "Mutation intent contains an unsupported step.")
+        if result.credential_mutation_intent.intended_generation != expected_generation:
+            raise ReadError(
+                "invalid_mutation_intent",
+                "Mutation intent does not identify the transaction's corresponding credential generation.",
+            )
     return result
 
 
@@ -436,7 +476,7 @@ def _target_json(value: KubernetesMutationTarget) -> dict[str, object]:
 
 def _intent_json(value: CredentialMutationIntent) -> dict[str, object]:
     return {
-        "operation": value.operation.value,
+        "step": value.step.value,
         "target": None if value.target is None else _target_json(value.target),
         "affected_location_ids": list(value.affected_location_ids),
         "intended_generation": value.intended_generation.value,
@@ -447,10 +487,7 @@ def _intent_json(value: CredentialMutationIntent) -> dict[str, object]:
 
 
 def _action_json(value: RuntimeActionProgress) -> dict[str, object]:
-    return {
-        "workload": {"kind": value.workload.kind.value, "name": value.workload.name},
-        "state": value.state.value,
-    }
+    return {"action_id": value.action_id, "state": value.state.value}
 
 
 def _wave_json(value: PropagationWave) -> dict[str, object]:
@@ -466,10 +503,10 @@ def _propagation_json(value: PropagationState) -> dict[str, object]:
 
 def _lockout_json(value: LockoutState) -> dict[str, object]:
     return {
-        "initial_normal_value": value.initial_normal_value,
+        "initial_ignore_lockout_failure_attempts": value.initial_ignore_lockout_failure_attempts,
         "suppression": value.suppression.value,
         "restoration": value.restoration.value,
-        "latest_observed_value": value.latest_observed_value,
+        "latest_ignore_lockout_failure_attempts": value.latest_ignore_lockout_failure_attempts,
         "restore_required": value.restore_required,
     }
 

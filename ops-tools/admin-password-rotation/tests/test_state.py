@@ -11,12 +11,12 @@ import pytest
 from admin_password_rotation.errors import ReadError
 from admin_password_rotation.model import (
     STATE_SCHEMA_VERSION, CompletedOutcome, CompletedRequest, ConfigurationDigest,
-    CredentialGeneration, CredentialMutationIntent, CredentialMutationOperation,
+    CredentialGeneration, CredentialMutationIntent, CredentialMutationStep,
     EnvironmentIdentity, ExecutionIdentity, IntentEffectState, KubernetesMutationTarget,
     LockoutChangeState, LockoutState, PasswordSafeState, PersistentState, PodIdentity,
     PropagationState, PropagationWave, ResolvedKeystoneIdentities, RotationPhase,
     RotationTransaction, RuntimeActionProgress, RuntimeActionState, SecretValue,
-    TransactionStatus, VerificationResult, VerificationStatus, WorkloadKind, WorkloadRef,
+    TransactionStatus, VerificationResult, VerificationStatus,
 )
 from admin_password_rotation.state import parse_state_json, serialize_state_json, state_document
 from admin_password_rotation.validation import object_list, object_mapping
@@ -32,11 +32,11 @@ GENERATION_B = CredentialGeneration("sha256:" + "b" * 64)
 
 def realistic_state() -> PersistentState:
     to_b_actions = (
-        RuntimeActionProgress(WorkloadRef(WorkloadKind.DEPLOYMENT, "octavia-api"), RuntimeActionState.PENDING),
-        RuntimeActionProgress(WorkloadRef(WorkloadKind.DAEMONSET, "octavia-worker-default"), RuntimeActionState.RUNNING),
+        RuntimeActionProgress("octavia-api-restart", RuntimeActionState.PENDING),
+        RuntimeActionProgress("admin-client", RuntimeActionState.RUNNING),
     )
     to_a_actions = (
-        RuntimeActionProgress(WorkloadRef(WorkloadKind.DEPLOYMENT, "blazar-api"), RuntimeActionState.COMPLETE),
+        RuntimeActionProgress("admin-client", RuntimeActionState.COMPLETE),
     )
     transaction = RotationTransaction(
         transaction_id=TRANSACTION_ID,
@@ -61,7 +61,7 @@ def realistic_state() -> PersistentState:
             original_a_version=7, observed_a_version=8, observed_b_version=3,
         ),
         credential_mutation_intent=CredentialMutationIntent(
-            operation=CredentialMutationOperation.SWITCH_TO_B,
+            step=CredentialMutationStep.PROPAGATE_TO_B,
             target=KubernetesMutationTarget("openstack", "octavia-etc", "secret-uid-1", "456"),
             affected_location_ids=("octavia-service-auth-etc",),
             intended_generation=GENERATION_B,
@@ -74,10 +74,10 @@ def realistic_state() -> PersistentState:
             to_a=PropagationWave(("keystone-admin",), to_a_actions),
         ),
         lockout=LockoutState(
-            initial_normal_value=True,
+            initial_ignore_lockout_failure_attempts=False,
             suppression=LockoutChangeState.INTENT_PERSISTED,
             restoration=LockoutChangeState.NOT_INTENDED,
-            latest_observed_value=True,
+            latest_ignore_lockout_failure_attempts=False,
             restore_required=True,
         ),
         verifications=(VerificationResult(
@@ -157,20 +157,61 @@ def test_state_contains_intent_before_effect_or_progress() -> None:
     assert parse_state_json(serialize_state_json(state)) == state
 
 
-def test_targetless_intent_can_record_a_verified_non_kubernetes_effect() -> None:
+@pytest.mark.parametrize(("step", "generation", "target", "locations"), [
+    (CredentialMutationStep.STAGE_B_PASSWORDSAFE, GENERATION_B, None, ()),
+    (CredentialMutationStep.RESET_B_KEYSTONE, GENERATION_B, None, ()),
+    (
+        CredentialMutationStep.PROPAGATE_TO_B,
+        GENERATION_B,
+        KubernetesMutationTarget("openstack", "octavia-etc", "secret-uid-1", "456"),
+        ("octavia-service-auth-etc",),
+    ),
+    (
+        CredentialMutationStep.STAGE_A_BREEDER,
+        GENERATION_A,
+        KubernetesMutationTarget("openstack", "keystone-admin", "breeder-uid", "123"),
+        (),
+    ),
+    (CredentialMutationStep.RESET_A_KEYSTONE, GENERATION_A, None, ()),
+    (CredentialMutationStep.UPDATE_A_PASSWORDSAFE, GENERATION_A, None, ()),
+    (
+        CredentialMutationStep.PROPAGATE_TO_A,
+        GENERATION_A,
+        KubernetesMutationTarget("openstack", "octavia-etc", "secret-uid-1", "456"),
+        ("octavia-service-auth-etc",),
+    ),
+])
+def test_effect_specific_intents_round_trip_exact_step(
+    step: CredentialMutationStep,
+    generation: CredentialGeneration,
+    target: KubernetesMutationTarget | None,
+    locations: tuple[str, ...],
+) -> None:
     state = realistic_state()
     assert state.current_transaction is not None
     intent = CredentialMutationIntent(
-        operation=CredentialMutationOperation.PREPARE_B,
-        target=None,
-        affected_location_ids=(),
-        intended_generation=GENERATION_B,
+        step=step,
+        target=target,
+        affected_location_ids=locations,
+        intended_generation=generation,
         effect_state=IntentEffectState.OBSERVED,
         effect_observed_at=UPDATED,
-        resulting_resource_version=None,
+        resulting_resource_version=None if target is None else "124",
     )
-    state = replace(state, current_transaction=replace(state.current_transaction, credential_mutation_intent=intent))
-    assert parse_state_json(serialize_state_json(state)) == state
+    state = replace(
+        state,
+        current_transaction=replace(
+            state.current_transaction,
+            credential_mutation_intent=intent,
+        ),
+    )
+    serialized = serialize_state_json(state)
+    parsed = parse_state_json(serialized)
+    assert parsed == state
+    assert parsed.current_transaction is not None
+    assert parsed.current_transaction.credential_mutation_intent is not None
+    assert parsed.current_transaction.credential_mutation_intent.step is step
+    assert f'"step": "{step.value}"' in serialized
 
 
 def test_propagation_waves_and_at_least_once_action_states_are_independent() -> None:
@@ -179,10 +220,23 @@ def test_propagation_waves_and_at_least_once_action_states_are_independent() -> 
     propagation = state.current_transaction.propagation
     assert propagation.to_b.applied_location_ids == ("barbican-keystone-admin",)
     assert propagation.to_a.applied_location_ids == ("keystone-admin",)
+    assert tuple(action.action_id for action in propagation.to_b.runtime_actions) == (
+        "octavia-api-restart", "admin-client",
+    )
     assert tuple(action.state for action in propagation.to_b.runtime_actions) == (
         RuntimeActionState.PENDING, RuntimeActionState.RUNNING,
     )
+    assert propagation.to_a.runtime_actions[0].action_id == "admin-client"
     assert propagation.to_a.runtime_actions[0].state is RuntimeActionState.COMPLETE
+
+
+def test_runtime_actions_serialize_as_configured_action_ids() -> None:
+    # These representative IDs can resolve to rollout_restart and recreate_pod
+    # definitions; durable state carries only their stable normalized IDs.
+    serialized = serialize_state_json(realistic_state())
+    assert '"action_id": "octavia-api-restart"' in serialized
+    assert '"action_id": "admin-client"' in serialized
+    assert '"workload"' not in serialized
 
 
 @pytest.mark.parametrize("schema_version", [1, 3, "2", True])
@@ -245,6 +299,80 @@ def test_observed_mutation_requires_observation_metadata() -> None:
     intent["effect_state"] = "effect_observed"
     with pytest.raises(ReadError, match="invalid_mutation_intent"):
         parse_state_json(encoded(value))
+
+
+@pytest.mark.parametrize(
+    ("step", "target", "locations"),
+    [
+        (
+            "stage_b_passwordsafe",
+            {
+                "namespace": "openstack",
+                "name": "example",
+                "uid": "uid",
+                "observed_resource_version": "1",
+            },
+            [],
+        ),
+        ("stage_a_breeder", None, []),
+        (
+            "propagate_to_b",
+            {
+                "namespace": "openstack",
+                "name": "example",
+                "uid": "uid",
+                "observed_resource_version": "1",
+            },
+            [],
+        ),
+        ("reset_a_keystone", None, ["keystone-admin"]),
+    ],
+)
+def test_incoherent_mutation_intent_shapes_rejected(
+    step: str, target: object, locations: list[str],
+) -> None:
+    value = document()
+    intent = mutable_mapping(transaction(value)["credential_mutation_intent"])
+    intent["step"] = step
+    intent["target"] = target
+    intent["affected_location_ids"] = locations
+    with pytest.raises(ReadError, match="invalid_mutation_intent"):
+        parse_state_json(encoded(value))
+
+
+def test_mutation_intent_generation_must_match_its_exact_step() -> None:
+    value = document()
+    intent = mutable_mapping(transaction(value)["credential_mutation_intent"])
+    intent["intended_generation"] = GENERATION_A.value
+    with pytest.raises(ReadError, match="invalid_mutation_intent"):
+        parse_state_json(encoded(value))
+
+
+def test_duplicate_runtime_action_ids_rejected_within_one_wave() -> None:
+    value = document()
+    propagation = mutable_mapping(transaction(value)["propagation"])
+    to_b = mutable_mapping(propagation["to_b"])
+    actions = object_list(to_b["runtime_actions"])
+    duplicate = dict(mutable_mapping(actions[0]))
+    actions.append(duplicate)
+    with pytest.raises(ReadError, match="duplicate_runtime_action"):
+        parse_state_json(encoded(value))
+
+
+def test_lockout_wire_fields_name_the_keystone_option_explicitly() -> None:
+    value = document()
+    lockout = mutable_mapping(transaction(value)["lockout"])
+    assert lockout["initial_ignore_lockout_failure_attempts"] is False
+    assert lockout["latest_ignore_lockout_failure_attempts"] is False
+    assert "initial_normal_value" not in lockout
+    assert "latest_observed_value" not in lockout
+
+    lockout["initial_ignore_lockout_failure_attempts"] = True
+    lockout["latest_ignore_lockout_failure_attempts"] = True
+    parsed = parse_state_json(encoded(value))
+    assert parsed.current_transaction is not None
+    assert parsed.current_transaction.lockout.initial_ignore_lockout_failure_attempts is True
+    assert parsed.current_transaction.lockout.latest_ignore_lockout_failure_attempts is True
 
 
 def test_current_transaction_cannot_also_be_completed() -> None:
