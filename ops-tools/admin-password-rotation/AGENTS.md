@@ -38,7 +38,9 @@ Examples of current amendments include:
 - generation identifiers use `sha256:<64 lowercase hex>` rather than the older HMAC design;
 - generic exactly-once/request-settlement machinery is not required;
 - runtime actions use at-least-once recovery semantics;
-- exact historical old-A retrieval is exceptional recovery behavior rather than a normal PasswordSafe operation.
+- exact historical old-A retrieval is exceptional recovery behavior rather than a normal PasswordSafe operation;
+- separate same-value capability probes are not required: the first real required mutation plus postcondition verification establishes capability;
+- `DISPATCH_UNRESOLVED` marks the point at which an external mutation may have reached its service, not merely the existence of persisted intent.
 
 When an explicit task prompt scopes a particular implementation slice or correction, follow that requested scope. Do not treat an older slice-specific restriction in historical notes as overriding the current task.
 
@@ -51,8 +53,10 @@ Preserve these unless an explicit design update says otherwise:
 - `Secret/openstack/keystone-admin.data.password` always semantically represents `admin`; it must never contain the `breakglass` credential.
 - Durable transaction state records intent and recovery context, not authoritative reality.
 - Observed external state takes precedence over progress flags.
-- Persist intent before consequential effects.
-- Read/verify actual state after effects before recording progress.
+- For each consequential mutation, persist pre-dispatch intent, assert current ownership, record `DISPATCH_UNRESOLVED` immediately before crossing the external dispatch boundary, perform the effect, reobserve actual state, and only then record progress.
+- A proven pre-dispatch failure is not an ambiguous external mutation. A generated credential may be abandoned and regenerated only if its cleartext was never externalized; after the dispatch boundary its generation is sticky.
+- PasswordSafe mutation capability is established by its first real required mutation and verified postcondition, not by a separate same-value probe.
+- Before any later A credential mutation, the real admin lockout-suppression operation must be positively observed active.
 - Unknown or contradictory credential state fails closed.
 - Kubernetes Lease ownership is cooperative ownership, not hard fencing.
 - Consequential Kubernetes mutations use object identity and optimistic concurrency.
@@ -72,7 +76,7 @@ Current boundaries include:
 
 Do not introduce `kubectl`, `openstack`, `curl`, or shell subprocesses into production mutation paths merely because equivalent manual commands exist.
 
-Existing constrained read-only bootstrap code may still use older mechanisms; do not refactor unrelated code unless the task requires it.
+The constrained Slice 1 read-only planning path may still use older mechanisms; do not refactor unrelated code unless the task requires it.
 
 ## Workflow scope
 
@@ -93,6 +97,8 @@ persisted intent
     ->
 ownership check
     ->
+dispatch-unresolved marker
+    ->
 effect
     ->
 read-back verification
@@ -101,6 +107,10 @@ progress recording
 ```
 
 Avoid hiding workflow decisions inside transport/client adapters.
+
+Write `DISPATCH_UNRESOLVED` only after ownership is established and immediately
+before execution crosses the external dispatch boundary. Persisted intent that is
+proven not to have reached dispatch is not mutation ambiguity.
 
 ## Secret handling
 
@@ -159,7 +169,7 @@ Do not:
 
 - delete or clean unrelated untracked files;
 - reset unrelated modifications;
-- absorb local bootstrap files into a change unless requested;
+- absorb unrelated local setup files into a change unless requested;
 - create commits, push branches, or open PRs unless explicitly requested.
 
 Make the smallest coherent change required by the current task.
@@ -188,10 +198,19 @@ Review the final diff for:
 
 ## Post-brief implementation amendments
 
-1. PasswordSafe exact-history retrieval remains a design requirement
-   for exceptional recovery, but its implementation is deferred until
-   the A-recovery slice establishes the concrete need. Slice 3A does
-   not expose get_exact_history_version().
+1. PasswordSafe exact-history retrieval remains a possible exceptional recovery
+   capability, but it is deferred until a concrete need is established. Slice 3C
+   demonstrates that A0-A3 reconciliation does not require it, and no current
+   client exposes `get_exact_history_version()`.
+2. Separate same-value capability probes are not required. The first real
+   mutation needed by the workflow, together with its normal postcondition
+   verification, establishes capability. PasswordSafe B staging follows this
+   rule; the later real admin lockout-suppression operation must likewise be
+   positively observed active before any A credential mutation.
+3. `DISPATCH_UNRESOLVED` is recorded only after ownership is established and the
+   workflow is about to issue the external request. It means dispatch may have
+   reached the external service. A failure proven to occur before that boundary
+   is not ambiguous and does not by itself make a credential generation sticky.
 
 ## Final report
 
