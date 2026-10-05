@@ -16,11 +16,12 @@ from .errors import ReadError
 from .model import (
     STATE_SCHEMA_VERSION, CompletedOutcome, CompletedRequest, ConfigurationDigest,
     CredentialGeneration, CredentialMutationIntent, CredentialMutationStep,
-    EnvironmentIdentity, ExecutionIdentity, IntentEffectState, KubernetesMutationTarget,
+    EnvironmentIdentity, ExecutionIdentity, Identity, IntentEffectState, KubernetesMutationTarget,
     LockoutChangeState, LockoutState, PasswordSafeState, PersistentState, PodIdentity,
-    PropagationState, PropagationWave, ResolvedKeystoneIdentities, RotationPhase,
+    PropagationLocationIntent, PropagationSecretGroupIntent, PropagationState,
+    PropagationWave, PropagationWaveIntent, ResolvedKeystoneIdentities, RotationPhase,
     RotationTransaction, RuntimeActionProgress, RuntimeActionState, SafeErrorInfo,
-    TransactionStatus, VerificationResult, VerificationStatus,
+    TransactionStatus, VerificationResult, VerificationStatus, WorkloadKind, WorkloadRef,
 )
 from .validation import is_identifier, is_object_name, nonempty_string, object_list, object_mapping
 
@@ -284,12 +285,143 @@ def _runtime_action(value: object) -> RuntimeActionProgress:
     return RuntimeActionProgress(_identifier(data["action_id"]), _enum(data["state"], RuntimeActionState))
 
 
+def _workload(value: object) -> WorkloadRef:
+    data = _fields(value, {"kind", "name"})
+    return WorkloadRef(
+        _enum(data["kind"], WorkloadKind), _object_name(data["name"]),
+    )
+
+
+def _wave_location(value: object) -> PropagationLocationIntent:
+    data = _fields(value, {
+        "location_id", "expected_identity", "expected_target",
+        "potential_restart_dependencies",
+    })
+    restarts = tuple(
+        _workload(item) for item in object_list(data["potential_restart_dependencies"])
+    )
+    if len(set(restarts)) != len(restarts):
+        raise ReadError(
+            "duplicate_restart_dependency",
+            "A propagation location repeats a potential restart dependency.",
+        )
+    if restarts != tuple(sorted(restarts, key=lambda item: item.label)):
+        raise ReadError(
+            "unordered_propagation_intent",
+            "Propagation intent restart dependencies must use stable ordering.",
+        )
+    return PropagationLocationIntent(
+        location_id=_identifier(data["location_id"]),
+        expected_identity=_enum(data["expected_identity"], Identity),
+        expected_target=_boolean(data["expected_target"]),
+        potential_restart_dependencies=restarts,
+    )
+
+
+def _wave_group(value: object) -> PropagationSecretGroupIntent:
+    data = _fields(value, {
+        "namespace", "secret_name", "observed_uid", "observed_resource_version",
+        "locations",
+    })
+    locations = tuple(_wave_location(item) for item in object_list(data["locations"]))
+    location_ids = tuple(item.location_id for item in locations)
+    if not locations:
+        raise ReadError(
+            "empty_propagation_group", "A propagation Secret group must not be empty.",
+        )
+    if len(set(location_ids)) != len(location_ids):
+        raise ReadError(
+            "duplicate_state_identifier", "Propagation intent repeats a location identifier.",
+        )
+    if location_ids != tuple(sorted(location_ids)):
+        raise ReadError(
+            "unordered_propagation_intent",
+            "Propagation intent locations must use stable ordering.",
+        )
+    return PropagationSecretGroupIntent(
+        namespace=_object_name(data["namespace"]),
+        secret_name=_object_name(data["secret_name"]),
+        observed_uid=nonempty_string(data["observed_uid"]),
+        observed_resource_version=nonempty_string(data["observed_resource_version"]),
+        locations=locations,
+    )
+
+
+def _wave_intent(value: object) -> PropagationWaveIntent:
+    data = _fields(value, {
+        "target_identity", "target_generation", "contract_digest", "secret_groups",
+    })
+    groups = tuple(_wave_group(item) for item in object_list(data["secret_groups"]))
+    keys = tuple((item.namespace, item.secret_name) for item in groups)
+    if not groups:
+        raise ReadError(
+            "empty_propagation_wave", "A durable propagation wave must not be empty.",
+        )
+    if len(set(keys)) != len(keys):
+        raise ReadError(
+            "duplicate_propagation_group", "Propagation intent repeats a Secret group.",
+        )
+    if keys != tuple(sorted(keys)):
+        raise ReadError(
+            "unordered_propagation_intent",
+            "Propagation intent Secret groups must use stable ordering.",
+        )
+    all_ids = tuple(
+        location.location_id for group in groups for location in group.locations
+    )
+    if len(set(all_ids)) != len(all_ids):
+        raise ReadError(
+            "duplicate_state_identifier", "Propagation intent repeats a location identifier.",
+        )
+    result = PropagationWaveIntent(
+        target_identity=_enum(data["target_identity"], Identity),
+        target_generation=_generation(data["target_generation"]),
+        contract_digest=_configuration_digest(data["contract_digest"]),
+        secret_groups=groups,
+    )
+    if any(
+        location.expected_target
+        and location.expected_identity is not result.target_identity
+        for group in result.secret_groups
+        for location in group.locations
+    ):
+        raise ReadError(
+            "invalid_propagation_intent",
+            "A target-matching propagation location has the wrong expected identity.",
+        )
+    return result
+
+
 def _wave(value: object) -> PropagationWave:
-    data = _fields(value, {"applied_location_ids", "runtime_actions"})
+    data = object_mapping(value)
+    required = {"applied_location_ids", "runtime_actions"}
+    if not required <= set(data):
+        raise ReadError("missing_state_field", "Persistent state is missing a required field.")
+    if set(data) - required - {"intent"}:
+        raise ReadError("unknown_state_field", "Persistent state contains an unsupported field.")
     actions = tuple(_runtime_action(item) for item in object_list(data["runtime_actions"]))
     if len({action.action_id for action in actions}) != len(actions):
         raise ReadError("duplicate_runtime_action", "A propagation wave contains a duplicate runtime action.")
-    return PropagationWave(_identifiers(data["applied_location_ids"]), actions)
+    applied = _identifiers(data["applied_location_ids"])
+    intent_value = data.get("intent")
+    intent = None if intent_value is None else _wave_intent(intent_value)
+    if intent is not None:
+        if applied != tuple(sorted(applied)):
+            raise ReadError(
+                "unordered_propagation_progress",
+                "Propagation progress must use stable location ordering.",
+            )
+        intended = {
+            location.location_id
+            for group in intent.secret_groups
+            for location in group.locations
+        }
+        if not set(applied) <= intended:
+            raise ReadError(
+                "invalid_propagation_progress",
+                "Propagation progress contains a location outside durable wave intent.",
+            )
+    return PropagationWave(applied, actions, intent)
 
 
 def _propagation(value: object) -> PropagationState:
@@ -385,6 +517,18 @@ def _transaction(value: object) -> RotationTransaction:
             raise ReadError(
                 "invalid_mutation_intent",
                 "Mutation intent does not identify the transaction's corresponding credential generation.",
+            )
+    for wave, target, generation in (
+        (result.propagation.to_b, Identity.BREAKGLASS, result.new_b_sha256),
+        (result.propagation.to_a, Identity.ADMIN, result.new_a_sha256),
+    ):
+        if wave.intent is not None and (
+            wave.intent.target_identity is not target
+            or wave.intent.target_generation != generation
+        ):
+            raise ReadError(
+                "invalid_propagation_intent",
+                "Propagation intent does not match its transaction wave or generation.",
             )
     return result
 
@@ -492,10 +636,45 @@ def _action_json(value: RuntimeActionProgress) -> dict[str, object]:
     return {"action_id": value.action_id, "state": value.state.value}
 
 
+def _workload_json(value: WorkloadRef) -> dict[str, object]:
+    return {"kind": value.kind.value, "name": value.name}
+
+
+def _wave_location_json(value: PropagationLocationIntent) -> dict[str, object]:
+    return {
+        "location_id": value.location_id,
+        "expected_identity": value.expected_identity.value,
+        "expected_target": value.expected_target,
+        "potential_restart_dependencies": [
+            _workload_json(item) for item in value.potential_restart_dependencies
+        ],
+    }
+
+
+def _wave_group_json(value: PropagationSecretGroupIntent) -> dict[str, object]:
+    return {
+        "namespace": value.namespace,
+        "secret_name": value.secret_name,
+        "observed_uid": value.observed_uid,
+        "observed_resource_version": value.observed_resource_version,
+        "locations": [_wave_location_json(item) for item in value.locations],
+    }
+
+
+def _wave_intent_json(value: PropagationWaveIntent) -> dict[str, object]:
+    return {
+        "target_identity": value.target_identity.value,
+        "target_generation": value.target_generation.value,
+        "contract_digest": value.contract_digest.value,
+        "secret_groups": [_wave_group_json(item) for item in value.secret_groups],
+    }
+
+
 def _wave_json(value: PropagationWave) -> dict[str, object]:
     return {
         "applied_location_ids": list(value.applied_location_ids),
         "runtime_actions": [_action_json(item) for item in value.runtime_actions],
+        "intent": None if value.intent is None else _wave_intent_json(value.intent),
     }
 
 
