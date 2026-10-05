@@ -1,13 +1,10 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. The CLI remains focused on topology inspection and
-planning. The library now includes durable transaction state, conditional
-Kubernetes persistence, cooperative Lease ownership, typed external mutation
-clients, the PREPARE_B workflow, and read-only A0-A3 reconciliation. There is no
-complete end-to-end rotation command yet. Slices 3D and 3E additionally provide
-bounded library orchestration for admin lockout suppression, canonical breeder
-staging, and forward convergence of the core A credential through observed A3.
+password-rotation tool. Slices 1-3 are complete. The CLI remains focused on
+topology inspection and planning, while bounded library workflows can establish
+or reconcile breakglass and move the canonical admin credential through
+A0 -> A1 -> A2 -> A3. There is no complete end-to-end rotation command yet.
 
 ```
 contract YAML -> validated immutable types -> Secret inventory
@@ -28,10 +25,32 @@ Keystone admin user from A1, requires fresh A2, updates and reads back the exact
 PasswordSafe admin record, and requires fresh A3. It does not generate or stage a
 credential, and it leaves lockout suppressed with restoration still required.
 
-These library workflows are not exposed as an end-to-end CLI runner. Runtime
-`SWITCH_TO_B` / `VERIFY_B` remain required before `ROTATE_A` and are not bypassed.
-Consumer propagation, runtime actions, `SWITCH_TO_A`, `VERIFY_A`, lockout
-restoration, and final transaction completion remain unimplemented.
+The implemented canonical `ROTATE_A` write order is breeder -> Keystone ->
+PasswordSafe, with forward recovery across A0/A1/A2/A3. These library workflows
+are not exposed as an end-to-end CLI runner. Runtime `SWITCH_TO_B` and `VERIFY_B`
+remain required before production execution may enter `ROTATE_A`; the ability to
+invoke its bounded primitives independently does not weaken that gate.
+
+Consumer propagation through contracted `role: propagated` locations, restart
+execution, rollout waiting, runtime/service verification, restoration of all
+consumers to admin, `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout
+restoration, and final transaction completion remain unimplemented. Lockout
+suppression needed by `ROTATE_A` is implemented, but the current Slice 3 path
+leaves it suppressed with restoration still required.
+
+The next implementation task is **Slice 4A — credential propagation mutation
+engine**: safely mutate one validated contracted propagated location to an
+explicitly requested allowed identity/credential using the existing fields, INI,
+YAML, and nested-YAML representation model. It must provide structural mutation,
+identity/state validation, optimistic concurrency, read-after-write verification,
+and changed/no-op/failure reporting. The mutating caller must hold and immediately
+revalidate current rotation execution ownership; Secret UID/resourceVersion
+checks are an additional object-state guard, not a substitute for ownership. Only
+declared credential selectors may change, unrelated configuration remains
+semantically invariant, and read-back must verify the same Secret UID plus the
+exact intended credential. Unknown state fails closed. A no-op contributes no
+restart consequence. Slice 4A does not restart workloads, execute or verify either
+cutover, or finalize the transaction.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
 clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl
@@ -48,7 +67,7 @@ exposes `get_exact_history_version()`.
 The Lease defaults are a 120-second duration, 20-second renewal interval and
 60-second renewal deadline. This is cooperative ownership, not hard fencing:
 expiry or takeover does not prove that an old process cannot reach an external
-service, so later workflow code must still reobserve and apply recovery gates.
+service, so mutation workflow code must still reobserve and apply recovery gates.
 
 ## Install and run locally
 

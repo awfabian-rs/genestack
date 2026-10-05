@@ -2,7 +2,7 @@
 
 ## Current project state
 
-This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool.
+This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E.
 
 The project now includes mutation-capable library behavior.
 
@@ -79,17 +79,26 @@ Slice 3E
     immutable A-new generation and no breeder staging
 ```
 
-The CLI remains primarily read-only/planning-oriented. PREPARE_B and Slices 3D/3E
-are available as bounded library workflows, and A-state reconciliation is
-available as a read-only library boundary; the end-to-end rotation command is not
-implemented.
+The CLI remains primarily read-only/planning-oriented. PREPARE_B and the bounded
+Slice 3 `ROTATE_A` workflows are implemented library capabilities, and A-state
+reconciliation is available as their read-only authority boundary. The code can
+establish/reconcile breakglass and move canonical admin through
+A0 -> A1 -> A2 -> A3. The end-to-end rotation command is not implemented.
 
-No implemented runner performs SWITCH_TO_B or VERIFY_B or bypasses those required
-runtime gates. Slice 3D changes only the admin lockout option and canonical breeder
-Secret, then stops at observed A1. Slice 3E is a separate bounded library
-capability that converges the core A credential to observed A3. No implemented
-path performs consumer propagation, SWITCH_TO_A, VERIFY_A, lockout restoration,
-or final transaction completion.
+The deployment has not yet been cut over between A and B. No implemented runner
+performs `SWITCH_TO_B` or `VERIFY_B`, and production execution must not enter
+`ROTATE_A` until `VERIFY_B` succeeds. Slice 3's independently invocable/testable
+primitives do not bypass or weaken that gate. Slice 3D changes only the admin
+lockout option and canonical breeder Secret, then stops at observed A1. Slice 3E
+converges the core A credential to observed A3. No implemented path propagates
+credentials to consumers, executes restart dependencies, waits for rollouts,
+performs runtime/service cutover verification, restores consumers to admin,
+executes `SWITCH_TO_A` / `VERIFY_A`, restores lockout policy, or completes the
+transaction.
+
+The next task is **Slice 4A — credential propagation mutation engine**: generic
+structural mutation of one validated contracted propagated credential location.
+Do not implement restarts or phase orchestration in Slice 4A.
 
 ## Read these first
 
@@ -224,9 +233,9 @@ response that lacks that guarantee.
 
 Do not add separate same-value capability probes. The first real required
 PasswordSafe mutation plus verified read-back establishes PasswordSafe write
-capability. Slice 3D must establish lockout capability through the actual
-lockout-suppression mutation and must positively observe suppression before
-staging A-new.
+capability. Slice 3D establishes lockout capability through the actual
+lockout-suppression mutation and positively observes suppression before staging
+A-new.
 
 Do not infer non-application merely from an unexpected mutation response.
 
@@ -377,7 +386,7 @@ MUTATION_AMBIGUOUS + effect not applied
 
 The PasswordSafe fake provides equivalent ambiguous mutation behavior.
 
-Later recovery tests should use normal observation methods to discover which reality occurred.
+Recovery tests should use normal observation methods to discover which reality occurred.
 
 ## Implemented PREPARE_B boundary
 
@@ -522,6 +531,18 @@ PATCH PasswordSafe admin to A-new
 GET and verify PasswordSafe
 ```
 
+In compact form, the implemented write order and states are:
+
+```text
+breeder -> Keystone -> PasswordSafe
+
+                    PasswordSafe / breeder / Keystone
+A0                              old / old / old
+A1                              old / new / old
+A2                              old / new / new
+A3                              new / new / new
+```
+
 Recognized A states remain:
 
 ```text
@@ -551,6 +572,82 @@ not program counters; mutation progress never overrides external reality. In
 particular, A-new success plus old-A indeterminacy is not A2.
 
 Forward recovery is preferred over routine password rollback.
+
+## Next task: Slice 4A
+
+Implement the credential propagation mutation engine. Its unit of work is one
+validated `CredentialLocation` whose `role` is `LocationRole.PROPAGATED`. Given an
+explicitly requested allowed identity/credential, it must structurally mutate the
+location's declared selectors, validate identity and observed state, use Secret
+UID/resourceVersion optimistic concurrency, read the Secret back, verify the
+exact declared credential, and report changed, no-op, or failure.
+
+Keep execution authorization distinct from object concurrency:
+
+```text
+Lease/current execution ownership
+    -> authorizes this execution to perform rotation mutation
+
+Secret UID/resourceVersion tests
+    -> prove the object and observed state still match the mutation decision
+```
+
+The mutating caller must hold valid current rotation execution ownership and
+revalidate it through the existing `LeaseOwnership.assert_owned()` boundary
+immediately before the correctness-sensitive Secret write. UID/resourceVersion
+tests are additionally mandatory and do not replace Lease ownership. Acquiring,
+renewing, and releasing the Lease—and orchestrating the overall A -> B -> A state
+machine—remain outside the one-location Slice 4A primitive.
+
+The mutation may alter only the username/password components selected by the
+location's representation. All unrelated configuration must remain semantically
+unchanged, especially within `octavia.conf`, `blazar.conf`, `clouds.yaml`, and
+embedded generated `clouds.yaml`. Do not use textual search-and-replace or treat
+the whole document as disposable. Harmless serialization formatting changes are
+acceptable where byte preservation is not guaranteed, but unrelated semantic
+configuration changes are not.
+
+After mutation, freshly reread the Secret and require all of the following:
+
+- it is still the intended object;
+- its UID equals the expected UID;
+- the declared representation resolves successfully;
+- the resolved credential exactly equals the intended target credential.
+
+A successful write response alone is insufficient. Matching content from a
+deleted and recreated same-name Secret does not verify the original mutation.
+
+Fail closed on credential state. Difference from the target does not by itself
+authorize an overwrite. Mutation is allowed only from an observed state permitted
+by the current higher-level transition and caller-provided validated intent;
+unknown or unexplained state is failure. If a permitted location is already at
+the target, report no-op without writing it. That invocation contributes no
+restart consequence. Only a location reported changed may contribute its
+configured restart dependencies to a later runtime subslice.
+
+Reuse the checked-in representation and contract model rather than introducing a
+parallel schema:
+
+- `config.py` produces the validated `CredentialContract` and
+  `CredentialLocation` values.
+- `model.py` already defines `IdentityBinding`, `LocationRole`,
+  `FieldsRepresentation`, `IniRepresentation`, `YamlRepresentation`,
+  `SecretSnapshot`, `ObservedCredential`, and the existing transaction types
+  `KubernetesMutationTarget`, `CredentialMutationIntent`, and `PropagationWave`.
+- `representations.py` and `syntax.py` contain the current exact fields/INI/YAML
+  and `document_path` parsing and validation semantics; mutation and read-back
+  must agree with `read_credential()`.
+- `kubernetes_api.py` is the shared direct Kubernetes-client construction
+  boundary. `breeder.py` demonstrates the required Secret UID/resourceVersion
+  JSON Patch discipline and read-after-write safety, but its breeder-specific
+  client and provenance must remain source-only rather than being generalized by
+  accident.
+
+Slice 4A must support `fields`, `ini`, `yaml`, and nested YAML/`document_path`.
+It must not execute any `CredentialLocation.restart` dependency, restart or wait
+for a workload, execute `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, or `VERIFY_A`,
+restore lockout policy, or finalize the transaction. Phase orchestration and
+runtime actions belong to later Slice 4 subslices.
 
 ## Code-change discipline
 
@@ -605,7 +702,7 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 ## Suggested next-agent task
 
-Select the next bounded slice from current checked-in guidance. Do not wire a
-runner that bypasses `SWITCH_TO_B` / `VERIFY_B`, and do not treat Slice 3E's A3 as
-transaction completion. Consumer propagation, `SWITCH_TO_A`, `VERIFY_A`, lockout
-restoration, final completion, runtime actions, and packaging remain unimplemented.
+Implement only Slice 4A as bounded above. Do not wire a runner, execute restart
+dependencies, bypass `SWITCH_TO_B` / `VERIFY_B`, or treat Slice 3E's A3 as
+transaction completion. Runtime cutover, verification, lockout restoration,
+final completion, and packaging remain later work.
