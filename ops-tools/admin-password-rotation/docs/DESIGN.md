@@ -6,8 +6,10 @@ Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented.
   scoped B credential mutations.
 - Read-only A0/A1/A2/A3 credential-state observation and classification is
   implemented as a library boundary.
-- SWITCH_TO_B, VERIFY_B, Keystone/PasswordSafe A mutation, and all later
-  orchestration remain unimplemented.
+- Slice 3D implements admin lockout suppression and canonical A-new breeder
+  staging, stopping only after fresh observation establishes A1.
+- SWITCH_TO_B, VERIFY_B, Keystone admin password mutation, PasswordSafe A
+  convergence, and all later orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -165,7 +167,10 @@ persist pre-dispatch intent
 immediately before crossing the external dispatch boundary. It means that the
 request may have reached the external service. A failure proven to occur before
 that boundary is not ambiguous and permits an unexternalized credential candidate
-to be abandoned and regenerated; after the boundary, its generation is sticky.
+to be abandoned and regenerated. An authoritative atomic conditional rejection
+likewise proves non-application; after reobservation, recovery returns to a
+pre-dispatch/retryable state and may replace a candidate whose clear text was
+lost. If a dispatched outcome may have applied, its generation remains sticky.
 
 Each credential-mutation intent names one exact consequential effect rather than a
 broad rotation phase. Runtime-action progress is keyed by the normalized configured
@@ -416,13 +421,15 @@ Slice 3C observation of A1. Lockout remains suppressed, restoration remains
 required, and the transaction remains in `ROTATE_A`; no Keystone admin password or
 PasswordSafe A mutation is performed.
 
-A failed UID/resourceVersion JSON Patch test is a definite atomic rejection, not
-an ambiguous external effect. Slice 3D re-reads the breeder and, when it is still
-the stable-UID old-A object without rotation provenance, returns staging to the
-pre-dispatch `UNKNOWN` intent state and reports a retryable conflict. A later
+A failed UID/resourceVersion JSON Patch test (`CONDITIONAL_REJECTED`) is a definite
+atomic rejection, not an ambiguous external effect. Slice 3D re-reads the breeder
+and, when it is still the stable-UID old-A object without rotation provenance,
+returns staging to the pre-dispatch `UNKNOWN` intent state and reports a retryable
+conflict. A later
 invocation may generate a replacement candidate if the prior cleartext was lost.
-`DISPATCH_UNRESOLVED` remains reserved for outcomes such as timeouts, 429s and 5xx
-responses where the patch may actually have applied; those generations stay sticky.
+`DISPATCH_UNRESOLVED` remains reserved for `OUTCOME_AMBIGUOUS` results such as
+timeouts, 429s and 5xx responses where the patch may actually have applied; those
+generations stay sticky.
 
 Slice 3E will later provide forward recovery: A1 resets Keystone admin to the exact
 staged A-new, A2 updates PasswordSafe admin to that exact value, and A3 means A

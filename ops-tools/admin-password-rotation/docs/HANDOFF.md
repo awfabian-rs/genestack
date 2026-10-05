@@ -198,8 +198,16 @@ Record `DISPATCH_UNRESOLVED` only after ownership is established and immediately
 before crossing the external dispatch boundary. It means the request may have
 reached the external service. A failure proven to occur before that boundary is
 not an ambiguous mutation; a credential candidate whose cleartext was never
-externalized may be abandoned and regenerated. After the boundary, its generation
-is sticky.
+externalized may be abandoned and regenerated. After an unresolved dispatch where
+application cannot be ruled out, its generation is sticky.
+
+Definite atomic conditional rejection (`CONDITIONAL_REJECTED`) is a separate
+recovery class. When the API authoritatively proves the mutation did not apply,
+reobserve and return to a pre-dispatch/retryable state rather than leaving
+`DISPATCH_UNRESOLVED`; a later execution may replace a lost in-memory candidate.
+For `OUTCOME_AMBIGUOUS`, retain `DISPATCH_UNRESOLVED` and the sticky intended
+generation. Do not infer definite non-application from a transport or server
+response that lacks that guarantee.
 
 Do not add separate same-value capability probes. The first real required
 PasswordSafe mutation plus verified read-back establishes PasswordSafe write
