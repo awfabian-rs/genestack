@@ -1,10 +1,12 @@
 # Design
 
-Status: Slices 1, 2A, 2B, 2C, 3A, and 3B are implemented.
+Status: Slices 1, 2A, 2B, 2C, 3A, 3B, and 3C are implemented.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
-- SWITCH_TO_B, ROTATE_A, and all later orchestration remain unimplemented.
+- Read-only A0/A1/A2/A3 credential-state observation and classification is
+  implemented as a library boundary.
+- SWITCH_TO_B, A mutation, and all later orchestration remain unimplemented.
 
 ## Boundaries
 
@@ -27,6 +29,7 @@ Status: Slices 1, 2A, 2B, 2C, 3A, and 3B are implemented.
 | `passwordsafe.py` | Rackspace Identity authentication and PasswordSafe current-credential read/update operations. |
 | `passwords.py` | Cryptographically secure administrative-password generation. |
 | `prepare_b.py` | Stable-A reconciliation and observed-state PREPARE_B/B0-B2 orchestration. |
+| `a_state.py` | Read-only authoritative A-credential observation and A0-A3 reconciliation. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -253,8 +256,8 @@ PasswordSafe reads use JSON. Password updates PATCH only the password, and HTTP
 workflow must use a separate GET to verify the observed credential and version.
 Historical PasswordSafe retrieval is not implemented in Slice 3A. Exact old-A
 history remains a deferred exceptional recovery capability from the implementation
-brief and will be implemented only if and when the later A-recovery slice
-demonstrates that it is required.
+brief. Slice 3C does not require it: current PasswordSafe A and the recorded
+stable-A generation provide the bounded old-A evidence used by classification.
 
 Replacement administrative passwords are exactly 32 characters from ASCII
 letters, digits and underscore, selected with Python's cryptographic `secrets`
@@ -320,6 +323,46 @@ Completion revalidates stable A, PasswordSafe B and authorized B authentication,
 then records the next phase as `SWITCH_TO_B` and stops. It does not mutate any
 managed consumer, begin propagation, suppress lockout, rotate A, or execute any
 later phase. Re-entering Slice 3B for an already advanced transaction is a no-op.
+
+## Read-only A credential reconciliation
+
+Slice 3C adds a read-only `a_state.py` library boundary. It freshly reads the
+configured PasswordSafe A record and breeder Secret, hashes each exact UTF-8
+credential as `sha256:<64 lowercase hex>`, and compares only those identifiers
+with the transaction's intended A-new generation. A changed value that does not
+match that generation is unknown; difference from old A is never enough to call
+it A-new. Once an intended generation exists, the successful `stable-a`
+verification generation recorded before rotation establishes old-A identity.
+No old-A plaintext journal or PasswordSafe history retrieval is introduced.
+
+The credential topology and fresh Keystone password authentication produce these
+observed states:
+
+```text
+A0  PasswordSafe and breeder contain established old A; old A authenticates as
+    the expected admin identity, scope and authorization.
+A1  PasswordSafe contains established old A, breeder contains intended A-new;
+    A-new is definitely rejected and old A authenticates as expected admin.
+A2  PasswordSafe contains established old A, breeder contains intended A-new;
+    A-new authenticates as expected admin.
+A3  PasswordSafe and breeder contain the identical intended A-new; A-new
+    authenticates as expected admin.
+```
+
+Successful authentication is accepted only for the recorded admin user ID,
+username, user domain, project ID/name/domain, required role ID and unexpired
+token. Credential rejection and indeterminate transport/policy/malformed outcomes
+remain distinct. Both old and new authenticating, wrong identity or scope,
+unknown credential generations, reversed/partial authority topologies, malformed
+representations and lack of any working admin candidate return typed invalid or
+indeterminate reconciliation results rather than being forced into A0-A3.
+
+Mutation intent and `DISPATCH_UNRESOLVED` progress are deliberately ignored as
+authority: they may explain why recovery is occurring, but observed external
+reality determines the credential state. Slice 3C performs no PasswordSafe,
+Keystone, breeder, transaction-progress, propagation or runtime write. Lockout
+state remains a separate typed transaction fact; this classifier neither reads a
+fresh lockout value nor uses lockout suppression to define A0-A3.
 
 ## Security and deployment limits
 
