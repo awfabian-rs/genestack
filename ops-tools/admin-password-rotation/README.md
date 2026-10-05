@@ -1,7 +1,7 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slice 4A are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass and move the canonical admin credential through
 A0 -> A1 -> A2 -> A3. There is no complete end-to-end rotation command yet.
@@ -12,7 +12,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, and 3E are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, and 4A are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -31,26 +31,26 @@ are not exposed as an end-to-end CLI runner. Runtime `SWITCH_TO_B` and `VERIFY_B
 remain required before production execution may enter `ROTATE_A`; the ability to
 invoke its bounded primitives independently does not weaken that gate.
 
-Consumer propagation through contracted `role: propagated` locations, restart
-execution, rollout waiting, runtime/service verification, restoration of all
-consumers to admin, `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout
-restoration, and final transaction completion remain unimplemented. Lockout
-suppression needed by `ROTATE_A` is implemented, but the current Slice 3 path
-leaves it suppressed with restoration still required.
+Slice 4A adds a library primitive that safely mutates one validated contracted
+`role: propagated` location to an explicitly supplied allowed admin or breakglass
+credential. It structurally updates fields, INI, direct YAML, or nested YAML;
+requires a recognized caller-permitted observed state; revalidates current
+execution ownership; uses Secret UID/resourceVersion preconditions; and rereads,
+reparses, and verifies the exact target. Candidate no-ops also revalidate
+ownership and freshly verify the same Secret UID and target credential before
+returning `UNCHANGED`. The caller must supply a target credential already proven
+authoritative by its higher-level reconciliation. Results distinguish changed
+from no-op and retain configured restart metadata without executing it. Conflicts, unsafe
+observations, Kubernetes failures, ambiguous writes, and verification failures
+are typed, credential-free errors.
 
-The next implementation task is **Slice 4A — credential propagation mutation
-engine**: safely mutate one validated contracted propagated location to an
-explicitly requested allowed identity/credential using the existing fields, INI,
-YAML, and nested-YAML representation model. It must provide structural mutation,
-identity/state validation, optimistic concurrency, read-after-write verification,
-and changed/no-op/failure reporting. The mutating caller must hold and immediately
-revalidate current rotation execution ownership; Secret UID/resourceVersion
-checks are an additional object-state guard, not a substitute for ownership. Only
-declared credential selectors may change, unrelated configuration remains
-semantically invariant, and read-back must verify the same Secret UID plus the
-exact intended credential. Unknown state fails closed. A no-op contributes no
-restart consequence. Slice 4A does not restart workloads, execute or verify either
-cutover, or finalize the transaction.
+There is still no propagation-wave or phase runner. Grouping per-Secret writes,
+persisting propagation/action obligations, restart execution, rollout waiting,
+runtime/service verification, restoration of all consumers to admin,
+`SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration, and
+final transaction completion remain unimplemented. Lockout suppression needed by
+`ROTATE_A` is implemented, but the current Slice 3 path leaves it suppressed with
+restoration still required.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
 clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl

@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) are complete. Slice 4A is next.
+Status: Slices 1-3 (through Slice 3E) and Slice 4A are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -10,10 +10,11 @@ Status: Slices 1-3 (through Slice 3E) are complete. Slice 4A is next.
   staging, stopping only after fresh observation establishes A1.
 - Slice 3E implements forward-only core A convergence from A1/A2/A3, stopping
   only after fresh observation establishes A3.
-- Propagation through contracted `role: propagated` locations, restart execution,
-  rollout waiting, runtime/service verification, SWITCH_TO_B, VERIFY_B,
-  SWITCH_TO_A, VERIFY_A, lockout restoration, and all later orchestration remain
-  unimplemented.
+- Slice 4A implements safe one-location mutation for contracted
+  `role: propagated` credentials.
+- Propagation-wave orchestration, restart execution, rollout waiting,
+  runtime/service verification, SWITCH_TO_B, VERIFY_B, SWITCH_TO_A, VERIFY_A,
+  lockout restoration, and all later orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -22,8 +23,8 @@ Status: Slices 1-3 (through Slice 3E) are complete. Slice 4A is next.
 | --- | --- |
 | `model.py` | Immutable typed configuration, observations, findings and plan data. |
 | `config.py` | Validate and normalize the supplied contract; resolve named representations. |
-| `syntax.py` | Bounded YAML structure reader with tags and source spans; no constructors or writers. |
-| `representations.py` | Read direct fields, explicit INI options, direct/embedded YAML paths. |
+| `syntax.py` | Bounded YAML structure reader with tags and source spans; no constructors. |
+| `representations.py` | Read and structurally mutate direct fields, explicit INI options, and direct/embedded YAML paths. |
 | `kubernetes.py` | Validate SecretList JSON; read live data through a constrained kubectl adapter. |
 | `discovery.py` | Compare against supplied reference values and audit undeclared known-password copies. |
 | `planning.py` | Pure function over contract and inventory; derive findings and potential dependencies. |
@@ -40,6 +41,7 @@ Status: Slices 1-3 (through Slice 3E) are complete. Slice 4A is next.
 | `a_state.py` | Read-only authoritative A-credential observation and A0-A3 reconciliation. |
 | `breeder.py` | Direct canonical-breeder reads and UID/resourceVersion-conditional password/provenance patches. |
 | `rotate_a.py` | Bounded Slice 3D A0-to-A1 staging and Slice 3E A1-to-A3 core-credential convergence. |
+| `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -100,7 +102,8 @@ explicit DEFAULT options are supported. A small lexical span finder verifies the
 selected value against ConfigParser so the audit masks only that option. Repeated
 options elsewhere in an oslo.config file may be valid to that service but are
 rejected by the Slice 1 parser: test real sanitized shapes before expanding
-compatibility. No serializer or mutation method is included.
+compatibility. Mutation reuses these exact source spans and reparses its output;
+it does not round-trip an entire INI document through ConfigParser.
 
 ## Bounded extra-copy audit
 
@@ -396,7 +399,7 @@ Keystone, breeder, transaction-progress, propagation or runtime write. Lockout
 state remains a separate typed transaction fact; this classifier neither reads a
 fresh lockout value nor uses lockout suppression to define A0-A3.
 
-## Runtime order and next implementation boundary
+## Runtime order and implemented boundaries
 
 The logical runtime transaction remains:
 
@@ -476,16 +479,17 @@ A3 = new / new / new
 ```
 
 Completing Slice 3 does not complete the A -> B -> A transaction. In particular,
-no implemented path propagates admin or breakglass into contracted propagated
-locations, executes their restart dependencies, waits for workload rollouts,
-performs service/runtime verification after cutover, restores all consumers to
-admin, or performs final `VERIFY_A` and transaction completion. `VERIFY_B` must
+no implemented orchestration path propagates a complete wave of admin or
+breakglass credentials, executes restart dependencies, waits for workload
+rollouts, performs service/runtime verification after cutover, restores all
+consumers to admin, or performs final `VERIFY_A` and transaction completion.
+The one-location Slice 4A primitive does not relax those gates. `VERIFY_B` must
 succeed before a production runner enters `ROTATE_A`; independent development and
 testing of the bounded `ROTATE_A` machinery does not relax that entry condition.
 
-### Slice 4A — credential propagation mutation engine
+### Implemented Slice 4A — credential propagation mutation engine
 
-Slice 4A is the next implementation boundary. It safely mutates one validated
+Slice 4A safely mutates one validated
 contracted `role: propagated` credential location to an explicitly requested
 allowed identity and credential. It covers the existing `FieldsRepresentation`,
 `IniRepresentation`, and `YamlRepresentation`, including nested YAML selected by
@@ -508,6 +512,8 @@ hold valid current ownership and must revalidate it with the existing ownership
 assertion immediately before the correctness-sensitive write; optimistic
 concurrency does not replace that assertion. Slice 4A does not acquire, renew, or
 release the Lease and does not own the overall A -> B -> A state machine.
+The no-op decision is also correctness-sensitive: a candidate no-op revalidates
+ownership before freshly reading and verifying current Secret reality.
 
 Structural mutation may change only the declared username/password selectors
 required for the requested target credential. All unrelated configuration must
@@ -527,11 +533,39 @@ target. A location may be mutated only from a state permitted by the current
 higher-level transition and its validated caller intent. An unknown or unexplained
 credential must fail closed rather than being treated as "needs update." If the
 same intended credential is already present in a permitted state, the result is a
-no-op: no mutation occurred and that invocation contributes no restart dependency.
-Only an actually changed location may contribute its configured restart edges to
-a later runtime subslice.
+no-op only after ownership revalidation and a fresh read proves the same Secret
+UID still contains the exact intended credential. A stale classified snapshot is
+never sufficient proof of convergence. No mutation occurred and that invocation
+contributes no restart dependency. Only an actually changed location may
+contribute its configured restart edges to a later runtime subslice.
 
-It does not execute restart dependencies, orchestrate `SWITCH_TO_B` or
+`classify_credential_location()` converts a successfully parsed exact admin or
+breakglass match into `ClassifiedCredentialLocation`; unknown, unverified, or
+unresolvable state never becomes a mutation input. `DesiredCredential` carries a
+redacted target value and identity, but construction does not prove that pairing
+is authoritative. The higher-level transition must first reconcile/authenticate
+the relevant admin or breakglass source and then supply that proven current
+credential. No existing source type alone proves that cross-system fact, so Slice
+4A deliberately keeps this as an explicit caller precondition rather than adding
+a misleading credential wrapper. `mutate_credential_location()` additionally
+requires the caller's explicitly permitted observed identities, rejects source
+locations and identity-binding violations, and calls the supplied ownership guard
+before either a no-op verification read or a write.
+
+`KubernetesApiCredentialSecretClient` replaces only changed Secret data entries
+with one JSON Patch guarded by atomic UID and resourceVersion tests. It never
+retries a rejected or ambiguous write. HTTP 409 and 412 responses are classified
+as conditional rejection; HTTP 422 remains a generic Kubernetes failure because
+the available exception fields do not robustly distinguish a failed JSON Patch
+`test` from unrelated validation errors without parsing fragile message text.
+`CredentialMutationResult` reports
+`CHANGED` or `UNCHANGED`, target identity, location, and configured restart
+dependencies; `required_restart_dependencies` is empty for no-op results. Stable
+`CredentialMutationErrorCode` values distinguish unsafe state, conflicts,
+ambiguous writes, Kubernetes failure, and post-write verification failure without
+including credential material.
+
+Slice 4A does not execute restart dependencies, orchestrate `SWITCH_TO_B` or
 `SWITCH_TO_A`, run `VERIFY_B` or `VERIFY_A`, wait for rollouts, or finalize the
 transaction. Those are later Slice 4 subslices. The contract-driven restart edges
 remain the model for those later runtime actions.
