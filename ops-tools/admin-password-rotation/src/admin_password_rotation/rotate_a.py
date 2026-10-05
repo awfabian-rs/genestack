@@ -56,6 +56,7 @@ class RotateAStageErrorCode(Enum):
     ADMIN_RECORD_INVALID = "rotate_a_admin_record_invalid"
     BREEDER_IDENTITY_CHANGED = "rotate_a_breeder_identity_changed"
     BREEDER_PRECONDITION_FAILED = "rotate_a_breeder_precondition_failed"
+    BREEDER_CONFLICT = "rotate_a_breeder_conflict"
     BREEDER_UNRESOLVED = "rotate_a_breeder_unresolved"
     BREEDER_UNKNOWN_CREDENTIAL = "rotate_a_breeder_unknown_credential"
     BREEDER_PROVENANCE_MISMATCH = "rotate_a_breeder_provenance_mismatch"
@@ -525,26 +526,50 @@ def _stage_breeder(
         session, snapshot, generation, IntentEffectState.DISPATCH_UNRESOLVED, now,
     )
     provenance = BreederProvenance(session.transaction.transaction_id, generation)
-    ambiguous = False
+    conditional_rejected = False
+    outcome_ambiguous = False
     try:
         breeder.conditional_stage(snapshot, password=value, provenance=provenance)
     except BreederError as error:
-        if error.kind not in (
-            BreederErrorCode.OUTCOME_AMBIGUOUS,
-            BreederErrorCode.CONDITIONAL_REJECTED,
-        ):
+        if error.kind is BreederErrorCode.CONDITIONAL_REJECTED:
+            # Kubernetes JSON Patch test failure is atomic proof that this
+            # request did not apply. Return the intent to pre-dispatch before
+            # reconciling the fresh object; this generation is no longer sticky.
+            _stage_intent(
+                session, snapshot, generation, IntentEffectState.UNKNOWN, now,
+            )
+            conditional_rejected = True
+        elif error.kind is BreederErrorCode.OUTCOME_AMBIGUOUS:
+            outcome_ambiguous = True
+        else:
             raise RotateAStageError(RotateAStageErrorCode.BREEDER_MUTATION_FAILED) from None
-        ambiguous = True
     try:
         observed = breeder.read(inputs.breeder_reference)
     except BreederError:
-        raise RotateAStageError(RotateAStageErrorCode.BREEDER_UNRESOLVED) from None
+        code = (
+            RotateAStageErrorCode.BREEDER_CONFLICT
+            if conditional_rejected
+            else RotateAStageErrorCode.BREEDER_UNRESOLVED
+        )
+        raise RotateAStageError(code) from None
     if _verify_staged_snapshot(
         session, observed, old_generation=old_generation,
     ):
         _mark_stage_observed(session, observed, now=now)
         return
-    if ambiguous:
+    if conditional_rejected:
+        if any(
+            observed.annotation(item.key) is not None
+            for item in provenance.annotations()
+        ):
+            raise RotateAStageError(
+                RotateAStageErrorCode.BREEDER_PROVENANCE_MISMATCH,
+            )
+        _stage_intent(
+            session, observed, generation, IntentEffectState.UNKNOWN, now,
+        )
+        raise RotateAStageError(RotateAStageErrorCode.BREEDER_CONFLICT)
+    if outcome_ambiguous:
         raise RotateAStageError(RotateAStageErrorCode.BREEDER_UNRESOLVED)
     raise RotateAStageError(RotateAStageErrorCode.BREEDER_MUTATION_FAILED)
 

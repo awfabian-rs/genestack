@@ -32,6 +32,8 @@ Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented.
 | `passwords.py` | Cryptographically secure administrative-password generation. |
 | `prepare_b.py` | Stable-A reconciliation and observed-state PREPARE_B/B0-B2 orchestration. |
 | `a_state.py` | Read-only authoritative A-credential observation and A0-A3 reconciliation. |
+| `breeder.py` | Direct canonical-breeder reads and UID/resourceVersion-conditional password/provenance patches. |
+| `rotate_a.py` | Bounded Slice 3D lockout suppression and A0-to-A1 breeder-staging orchestration. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -413,6 +415,14 @@ Read-back verifies identity, generation and provenance. Success requires fresh
 Slice 3C observation of A1. Lockout remains suppressed, restoration remains
 required, and the transaction remains in `ROTATE_A`; no Keystone admin password or
 PasswordSafe A mutation is performed.
+
+A failed UID/resourceVersion JSON Patch test is a definite atomic rejection, not
+an ambiguous external effect. Slice 3D re-reads the breeder and, when it is still
+the stable-UID old-A object without rotation provenance, returns staging to the
+pre-dispatch `UNKNOWN` intent state and reports a retryable conflict. A later
+invocation may generate a replacement candidate if the prior cleartext was lost.
+`DISPATCH_UNRESOLVED` remains reserved for outcomes such as timeouts, 429s and 5xx
+responses where the patch may actually have applied; those generations stay sticky.
 
 Slice 3E will later provide forward recovery: A1 resets Keystone admin to the exact
 staged A-new, A2 updates PasswordSafe admin to that exact value, and A3 means A

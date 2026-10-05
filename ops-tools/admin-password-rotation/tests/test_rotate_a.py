@@ -619,6 +619,11 @@ def test_postdispatch_generation_is_sticky_and_old_breeder_does_not_regenerate()
     current = store.current.state.current_transaction
     assert current is not None
     assert current.new_a_sha256 == intended
+    assert current.credential_mutation_intent is not None
+    assert (
+        current.credential_mutation_intent.effect_state
+        is IntentEffectState.DISPATCH_UNRESOLVED
+    )
     assert calls == 0
     assert breeder.stage_calls == 1
 
@@ -642,24 +647,99 @@ def test_breeder_conflict_reobserves_and_never_overwrites_replacement() -> None:
     assert breeder.snapshot.get("password") == A_OLD
 
 
-def test_resource_version_conflict_reobserves_without_blind_overwrite() -> None:
+def test_resource_version_conflict_returns_to_predispatch_and_can_regenerate() -> None:
     store = MemoryStateStore(state(transaction(
         suppressed=True, restore_required=True,
     )))
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
     breeder = FakeBreederSecretClient(breeder_snapshot())
     breeder.before_stage = lambda client: setattr(
         client, "snapshot", replace(client.snapshot, resource_version="124"),
     )
 
     assert_error(
-        RotateAStageErrorCode.BREEDER_UNRESOLVED, store, passwordsafe(),
-        keystone(suppressed=True), breeder,
+        RotateAStageErrorCode.BREEDER_CONFLICT, store, ps, ks, breeder,
+        generated=A_NEW_1,
     )
     tx = store.current.state.current_transaction
     assert tx is not None
     assert tx.credential_mutation_intent is not None
-    assert tx.credential_mutation_intent.effect_state is IntentEffectState.DISPATCH_UNRESOLVED
+    assert tx.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
+    assert tx.credential_mutation_intent.target is not None
+    assert tx.credential_mutation_intent.target.observed_resource_version == "124"
+    assert tx.new_a_sha256 == CredentialGeneration.from_secret(A_NEW_1)
     assert breeder.snapshot.get("password") == A_OLD
+    assert breeder.stage_calls == 1
+
+    result = run(store, ps, ks, breeder, generated=A_NEW_2)
+
+    current = result.persisted.state.current_transaction
+    assert current is not None
+    assert result.outcome is RotateAStageOutcome.A1_ESTABLISHED
+    assert current.new_a_sha256 == CredentialGeneration.from_secret(A_NEW_2)
+    assert breeder.snapshot.get("password") == A_NEW_2
+    assert breeder.stage_calls == 2
+
+
+def test_conditional_rejection_reobserves_independently_staged_intended_a() -> None:
+    store = MemoryStateStore(state(transaction(
+        suppressed=True, restore_required=True,
+    )))
+    breeder = FakeBreederSecretClient(breeder_snapshot())
+    generation = CredentialGeneration.from_secret(A_NEW_1)
+    breeder.before_stage = lambda client: setattr(
+        client,
+        "snapshot",
+        replace(
+            client.snapshot,
+            resource_version="124",
+            data=tuple(
+                SecretField(item.key, A_NEW_1) if item.key == "password" else item
+                for item in client.snapshot.data
+            ),
+            annotations=(
+                *client.snapshot.annotations,
+                *staged_annotations(generation),
+            ),
+        ),
+    )
+
+    result = run(store, passwordsafe(), keystone(suppressed=True), breeder)
+
+    assert result.outcome is RotateAStageOutcome.A1_ESTABLISHED
+    assert breeder.stage_calls == 1
+
+
+def test_conditional_rejection_old_a_with_rotation_provenance_fails_closed() -> None:
+    store = MemoryStateStore(state(transaction(
+        suppressed=True, restore_required=True,
+    )))
+    breeder = FakeBreederSecretClient(breeder_snapshot())
+    generation = CredentialGeneration.from_secret(A_NEW_1)
+    breeder.before_stage = lambda client: setattr(
+        client,
+        "snapshot",
+        replace(
+            client.snapshot,
+            resource_version="124",
+            annotations=(
+                *client.snapshot.annotations,
+                *staged_annotations(generation),
+            ),
+        ),
+    )
+
+    assert_error(
+        RotateAStageErrorCode.BREEDER_PROVENANCE_MISMATCH,
+        store, passwordsafe(), keystone(suppressed=True), breeder,
+    )
+    tx = store.current.state.current_transaction
+    assert tx is not None
+    assert tx.credential_mutation_intent is not None
+    assert tx.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
+    assert breeder.snapshot.get("password") == A_OLD
+    assert breeder.stage_calls == 1
 
 
 def test_ambiguous_breeder_apply_is_recognized_by_generation_and_provenance() -> None:
