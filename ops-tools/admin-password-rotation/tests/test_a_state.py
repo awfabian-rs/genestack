@@ -112,9 +112,13 @@ def transaction(
     )
 
 
-def inventory_with_breeder(password: SecretValue) -> SecretInventory:
+def inventory_with_breeder(
+    password: SecretValue,
+    *,
+    uid: str = "fixture-keystone-admin",
+) -> SecretInventory:
     return SecretInventory("openstack", "456", (
-        secret("keystone-admin", {"password": password.reveal()}),
+        replace(secret("keystone-admin", {"password": password.reveal()}), uid=uid),
         secret("consumer", {
             "OS_USERNAME": b"admin",
             "OS_PASSWORD": A_OLD.reveal(),
@@ -149,11 +153,12 @@ def inputs(
     state: RotationTransaction,
     *,
     breeder: SecretValue,
+    breeder_uid: str = "fixture-keystone-admin",
 ) -> ARotationInputs:
     return ARotationInputs(
         transaction=state,
         contract=contract(),
-        inventory=inventory_with_breeder(breeder),
+        inventory=inventory_with_breeder(breeder, uid=breeder_uid),
         passwordsafe_access=IdentityAccess(
             datetime(2030, 1, 1, tzinfo=timezone.utc),
             SecretValue(b"redacted-passwordsafe-token"),
@@ -169,10 +174,11 @@ def observe(
     breeder: SecretValue,
     keystone: FakeKeystoneClient,
     passwordsafe_version: int = 7,
+    breeder_uid: str = "fixture-keystone-admin",
 ) -> tuple[AReconciliationResult, FakePasswordSafeClient]:
     ps = passwordsafe_with(passwordsafe_value, version=passwordsafe_version)
     result = observe_a_rotation_state(
-        inputs(state, breeder=breeder),
+        inputs(state, breeder=breeder, breeder_uid=breeder_uid),
         passwordsafe=ps,
         keystone=keystone,
         clock=lambda: NOW,
@@ -257,6 +263,55 @@ def test_a3_both_authorities_match_intended_and_new_authenticates() -> None:
         keystone=keystone_with(A_NEW),
     )
     assert_state(result, ARotationObservedState.A3)
+
+
+def test_recreated_breeder_blocks_a0_before_authentication() -> None:
+    keystone = TrackingKeystone(A_OLD)
+    result, _ = observe(
+        transaction(intended=None),
+        passwordsafe_value=A_OLD,
+        breeder=A_OLD,
+        breeder_uid="replacement-keystone-admin",
+        keystone=keystone,
+    )
+    assert result.status is AReconciliationStatus.INVALID
+    assert result.reason is AReconciliationReason.BREEDER_IDENTITY_CHANGED
+    assert result.state is None
+    assert keystone.auth_generations == []
+
+
+@pytest.mark.parametrize("accepted", [A_OLD, A_NEW])
+def test_recreated_breeder_blocks_a1_or_a2_before_authentication(
+    accepted: SecretValue,
+) -> None:
+    keystone = TrackingKeystone(accepted)
+    result, _ = observe(
+        transaction(intended=NEW_GENERATION),
+        passwordsafe_value=A_OLD,
+        breeder=A_NEW,
+        breeder_uid="replacement-keystone-admin",
+        keystone=keystone,
+    )
+    assert result.status is AReconciliationStatus.INVALID
+    assert result.reason is AReconciliationReason.BREEDER_IDENTITY_CHANGED
+    assert result.state is None
+    assert keystone.auth_generations == []
+
+
+def test_recreated_breeder_blocks_a3_before_authentication() -> None:
+    keystone = TrackingKeystone(A_NEW)
+    result, _ = observe(
+        transaction(intended=NEW_GENERATION),
+        passwordsafe_value=A_NEW,
+        passwordsafe_version=8,
+        breeder=A_NEW,
+        breeder_uid="replacement-keystone-admin",
+        keystone=keystone,
+    )
+    assert result.status is AReconciliationStatus.INVALID
+    assert result.reason is AReconciliationReason.BREEDER_IDENTITY_CHANGED
+    assert result.state is None
+    assert keystone.auth_generations == []
 
 
 @pytest.mark.parametrize(
@@ -451,7 +506,21 @@ def test_both_old_and_new_success_is_anomalous() -> None:
     assert result.reason is AReconciliationReason.BOTH_OLD_AND_NEW_ACCEPTED
 
 
-def test_a2_does_not_require_old_rejection_when_optional_old_check_is_indeterminate() -> None:
+def test_a2_live_observation_blocks_when_old_authentication_is_indeterminate() -> None:
+    keystone = AlteredKeystone(A_NEW, "second_indeterminate")
+    result, _ = observe(
+        transaction(intended=NEW_GENERATION),
+        passwordsafe_value=A_OLD,
+        breeder=A_NEW,
+        keystone=keystone,
+    )
+    assert result.status is AReconciliationStatus.INDETERMINATE
+    assert result.reason is AReconciliationReason.AUTHENTICATION_INDETERMINATE
+    assert result.state is None
+    assert keystone.auth_generations == [NEW_GENERATION, OLD_GENERATION]
+
+
+def test_a2_is_indeterminate_when_old_authentication_is_indeterminate() -> None:
     observation = ARotationObservation(
         passwordsafe_record_id=101,
         passwordsafe_version=7,
@@ -477,7 +546,10 @@ def test_a2_does_not_require_old_rejection_when_optional_old_check_is_indetermin
             ),
         ),
     )
-    assert_state(classify_a_rotation(observation), ARotationObservedState.A2)
+    result = classify_a_rotation(observation)
+    assert result.status is AReconciliationStatus.INDETERMINATE
+    assert result.reason is AReconciliationReason.AUTHENTICATION_INDETERMINATE
+    assert result.state is None
 
 
 def test_progress_pending_does_not_hide_already_staged_breeder() -> None:
@@ -536,7 +608,22 @@ def test_intended_generation_can_still_observe_known_prestage_a0() -> None:
     assert_state(result, ARotationObservedState.A0)
 
 
-def test_equal_nonintended_value_without_old_evidence_is_invalid() -> None:
+def test_a0_requires_the_stable_a_credential_generation() -> None:
+    keystone = TrackingKeystone(A_UNKNOWN)
+    result, _ = observe(
+        transaction(intended=None),
+        passwordsafe_value=A_UNKNOWN,
+        passwordsafe_version=8,
+        breeder=A_UNKNOWN,
+        keystone=keystone,
+    )
+    assert result.status is AReconciliationStatus.INVALID
+    assert result.reason is AReconciliationReason.EQUAL_UNKNOWN_GENERATION
+    assert keystone.auth_generations == []
+
+
+def test_missing_stable_a_authority_is_invalid() -> None:
+    keystone = TrackingKeystone(A_UNKNOWN)
     result, _ = observe(
         transaction(
             intended=NEW_GENERATION,
@@ -545,10 +632,11 @@ def test_equal_nonintended_value_without_old_evidence_is_invalid() -> None:
         passwordsafe_value=A_UNKNOWN,
         passwordsafe_version=8,
         breeder=A_UNKNOWN,
-        keystone=keystone_with(A_UNKNOWN),
+        keystone=keystone,
     )
     assert result.status is AReconciliationStatus.INVALID
-    assert result.reason is AReconciliationReason.EQUAL_UNKNOWN_GENERATION
+    assert result.reason is AReconciliationReason.STABLE_A_AUTHORITY_INVALID
+    assert keystone.auth_generations == []
 
 
 def test_observation_and_result_representations_are_secret_free() -> None:
@@ -599,6 +687,9 @@ class AlteredKeystone(TrackingKeystone):
         self, request: KeystonePasswordAuthRequest,
     ) -> KeystoneAuthenticationResult:
         if self.alteration == "first_indeterminate" and not self.auth_generations:
+            self.auth_generations.append(CredentialGeneration.from_secret(request.password))
+            return KeystoneAuthIndeterminate(KeystoneIndeterminateReason.DEPENDENCY_FAILURE)
+        if self.alteration == "second_indeterminate" and len(self.auth_generations) == 1:
             self.auth_generations.append(CredentialGeneration.from_secret(request.password))
             return KeystoneAuthIndeterminate(KeystoneIndeterminateReason.DEPENDENCY_FAILURE)
         result = super().authenticate_password(request)

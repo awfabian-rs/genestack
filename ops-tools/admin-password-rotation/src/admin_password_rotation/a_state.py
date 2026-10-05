@@ -37,8 +37,10 @@ class AReconciliationStatus(Enum):
 
 class AReconciliationReason(Enum):
     INVENTORY_NAMESPACE_MISMATCH = "inventory_namespace_mismatch"
+    STABLE_A_AUTHORITY_INVALID = "stable_a_authority_invalid"
     BREEDER_MISSING = "breeder_missing"
     BREEDER_MALFORMED = "breeder_malformed"
+    BREEDER_IDENTITY_CHANGED = "breeder_identity_changed"
     PASSWORDSAFE_ACCESS_EXPIRED = "passwordsafe_access_expired"
     PASSWORDSAFE_RECORD_INVALID = "passwordsafe_record_invalid"
     PASSWORDSAFE_UNAVAILABLE = "passwordsafe_unavailable"
@@ -145,6 +147,12 @@ class _Topology(Enum):
     A3 = "A3"
 
 
+@dataclass(frozen=True)
+class _StableAAuthority:
+    breeder_uid: str
+    old_generation: CredentialGeneration
+
+
 Clock = Callable[[], datetime]
 
 
@@ -190,6 +198,11 @@ def _topology(
                 AReconciliationReason.NO_INTENDED_GENERATION_DIVERGENCE,
                 observation,
             )
+        if not (
+            observation.passwordsafe_is_established_old
+            and observation.breeder_is_established_old
+        ):
+            return _invalid(AReconciliationReason.EQUAL_UNKNOWN_GENERATION, observation)
         return _Topology.A0
 
     if passwordsafe_new:
@@ -291,15 +304,23 @@ def classify_a_rotation(
             return _invalid(
                 AReconciliationReason.ADMIN_IDENTITY_SCOPE_MISMATCH, observation,
             )
-        if old_auth is not None and old_auth.status is KeystoneAuthenticationStatus.SUCCESS:
+        if old_auth is None:
+            return _indeterminate(
+                AReconciliationReason.AUTHENTICATION_NOT_OBSERVED, observation,
+            )
+        if old_auth.status is KeystoneAuthenticationStatus.INDETERMINATE:
+            return _indeterminate(
+                AReconciliationReason.AUTHENTICATION_INDETERMINATE, observation,
+            )
+        if old_auth.status is KeystoneAuthenticationStatus.SUCCESS:
             reason = (
                 AReconciliationReason.BOTH_OLD_AND_NEW_ACCEPTED
                 if old_auth.expected_admin
                 else AReconciliationReason.ADMIN_IDENTITY_SCOPE_MISMATCH
             )
             return _invalid(reason, observation)
-        # Positive, correctly scoped A-new authentication establishes A2.  An
-        # old-A rejection is useful corroboration, but is not required.
+        # A2 requires the determinate distinction that A-new succeeds while
+        # established old A is rejected.
         return _valid(ARotationObservedState.A2, observation)
 
     if old_auth is None:
@@ -319,16 +340,24 @@ def classify_a_rotation(
     return _valid(ARotationObservedState.A1, observation)
 
 
-def _stable_a_generations(
+def _stable_a_authority(
     transaction: RotationTransaction,
-) -> frozenset[CredentialGeneration]:
-    return frozenset(
-        item.credential_generation
+) -> _StableAAuthority | None:
+    matches = tuple(
+        item
         for item in transaction.verifications
         if item.check_id == "stable-a"
         and item.phase is RotationPhase.PREPARE_B
         and item.status is VerificationStatus.SUCCESS
-        and item.credential_generation is not None
+    )
+    if len(matches) != 1:
+        return None
+    verification = matches[0]
+    if not verification.target_uid or verification.credential_generation is None:
+        return None
+    return _StableAAuthority(
+        breeder_uid=verification.target_uid,
+        old_generation=verification.credential_generation,
     )
 
 
@@ -410,12 +439,13 @@ def observe_a_rotation_state(
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("A-state observation clock must return a timezone-aware value.")
     now = now.astimezone(timezone.utc)
-    if inputs.passwordsafe_access.expires_at <= now:
-        return _indeterminate(
-            AReconciliationReason.PASSWORDSAFE_ACCESS_EXPIRED, None,
-        )
     if inputs.inventory.namespace != inputs.contract.namespace:
         return _invalid(AReconciliationReason.INVENTORY_NAMESPACE_MISMATCH, None)
+
+    transaction = inputs.transaction
+    stable_a = _stable_a_authority(transaction)
+    if stable_a is None:
+        return _invalid(AReconciliationReason.STABLE_A_AUTHORITY_INVALID, None)
 
     source = next(
         (
@@ -426,6 +456,12 @@ def observe_a_rotation_state(
     )
     if source is None:
         return _invalid(AReconciliationReason.BREEDER_MISSING, None)
+    if source.uid != stable_a.breeder_uid:
+        return _invalid(AReconciliationReason.BREEDER_IDENTITY_CHANGED, None)
+    if inputs.passwordsafe_access.expires_at <= now:
+        return _indeterminate(
+            AReconciliationReason.PASSWORDSAFE_ACCESS_EXPIRED, None,
+        )
     try:
         breeder_password = read_credential(
             source, inputs.contract.source.representation,
@@ -434,7 +470,6 @@ def observe_a_rotation_state(
     except (RepresentationError, ValueError):
         return _invalid(AReconciliationReason.BREEDER_MALFORMED, None)
 
-    transaction = inputs.transaction
     try:
         passwordsafe_record = passwordsafe.get_current(
             access=inputs.passwordsafe_access,
@@ -468,19 +503,8 @@ def observe_a_rotation_state(
         breeder_password.reveal(), passwordsafe_record.password.reveal(),
     )
     intended = transaction.new_a_sha256
-    stable_generations = _stable_a_generations(transaction)
-    passwordsafe_old = (
-        intended is None
-        or (
-            passwordsafe_generation != intended
-            and passwordsafe_generation in stable_generations
-        )
-    )
-    breeder_old = (
-        intended is None
-        or breeder_generation in stable_generations
-        or (same and passwordsafe_old)
-    )
+    passwordsafe_old = passwordsafe_generation == stable_a.old_generation
+    breeder_old = breeder_generation == stable_a.old_generation
     observation = ARotationObservation(
         passwordsafe_record_id=passwordsafe_record.credential_id,
         passwordsafe_version=passwordsafe_record.version,

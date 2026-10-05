@@ -254,10 +254,9 @@ credential for a redacted token used as PasswordSafe `X-Auth-Token`. Normal
 PasswordSafe reads use JSON. Password updates PATCH only the password, and HTTP
 204 is merely acceptance of the request, not proof of durable completion. Future
 workflow must use a separate GET to verify the observed credential and version.
-Historical PasswordSafe retrieval is not implemented in Slice 3A. Exact old-A
-history remains a deferred exceptional recovery capability from the implementation
-brief. Slice 3C does not require it: current PasswordSafe A and the recorded
-stable-A generation provide the bounded old-A evidence used by classification.
+Historical PasswordSafe retrieval is not implemented. Exact old-A history remains
+a deferred exceptional recovery capability from the implementation brief; Slice 3C
+instead uses current PasswordSafe A and the successful stable-A verification.
 
 Replacement administrative passwords are exactly 32 characters from ASCII
 letters, digits and underscore, selected with Python's cryptographic `secrets`
@@ -331,9 +330,11 @@ configured PasswordSafe A record and breeder Secret, hashes each exact UTF-8
 credential as `sha256:<64 lowercase hex>`, and compares only those identifiers
 with the transaction's intended A-new generation. A changed value that does not
 match that generation is unknown; difference from old A is never enough to call
-it A-new. Once an intended generation exists, the successful `stable-a`
-verification generation recorded before rotation establishes old-A identity.
-No old-A plaintext journal or PasswordSafe history retrieval is introduced.
+it A-new. The successful `stable-a` verification recorded before rotation
+establishes both old-A generation identity and the breeder Secret UID. The current
+breeder must retain that UID before any credential topology or authentication is
+accepted; credential equality cannot legitimize a deleted and recreated object.
+No old-A plaintext journal is introduced.
 
 The credential topology and fresh Keystone password authentication produce these
 observed states:
@@ -344,7 +345,7 @@ A0  PasswordSafe and breeder contain established old A; old A authenticates as
 A1  PasswordSafe contains established old A, breeder contains intended A-new;
     A-new is definitely rejected and old A authenticates as expected admin.
 A2  PasswordSafe contains established old A, breeder contains intended A-new;
-    A-new authenticates as expected admin.
+    A-new authenticates as expected admin and old A is definitely rejected.
 A3  PasswordSafe and breeder contain the identical intended A-new; A-new
     authenticates as expected admin.
 ```
@@ -354,8 +355,10 @@ username, user domain, project ID/name/domain, required role ID and unexpired
 token. Credential rejection and indeterminate transport/policy/malformed outcomes
 remain distinct. Both old and new authenticating, wrong identity or scope,
 unknown credential generations, reversed/partial authority topologies, malformed
-representations and lack of any working admin candidate return typed invalid or
-indeterminate reconciliation results rather than being forced into A0-A3.
+representations, breeder UID replacement and lack of any working admin candidate
+return typed invalid or indeterminate reconciliation results rather than being
+forced into A0-A3. An indeterminate old-A authentication prevents A2 even when
+A-new authentication succeeds.
 
 Mutation intent and `DISPATCH_UNRESOLVED` progress are deliberately ignored as
 authority: they may explain why recovery is occurring, but observed external

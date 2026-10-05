@@ -356,8 +356,10 @@ password-authentication results, then classifies A0/A1/A2/A3 or returns a typed
 invalid/indeterminate result. Exact credential bytes are reduced to generation
 identifiers; the observation and result types contain no cleartext credential.
 The transaction's intended A-new generation is the only accepted new generation,
-and the earlier successful `stable-a` verification identifies old A once rotation
-has an intended new generation.
+and the earlier successful `stable-a` verification identifies old A and anchors
+the breeder Secret UID. A current breeder with a different UID is invalid before
+topology evaluation or authentication, even when its credential bytes match an
+otherwise expected generation.
 
 Transaction mutation progress is not authoritative. For example, already-staged
 breeder reality can classify A1 despite pending progress, fresh A-new rejection
@@ -365,7 +367,9 @@ overrides a recorded Keystone-reset success, and matching intended values plus
 fresh valid A-new authentication classify A3 despite unresolved PasswordSafe
 progress. Wrong identity/scope/authorization, unknown generations, both candidates
 authenticating, malformed authority data and indeterminate authentication all
-block with specific safe reason codes.
+block with specific safe reason codes. A2 specifically requires correctly scoped
+A-new success plus a determinate old-A rejection; indeterminate old-A
+authentication blocks A2.
 
 This boundary does not suppress lockout, generate A-new, write the breeder, reset
 Keystone admin, update PasswordSafe A, write transaction progress, propagate a
