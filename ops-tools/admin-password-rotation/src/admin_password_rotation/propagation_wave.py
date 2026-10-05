@@ -39,6 +39,9 @@ class PropagationWaveErrorCode(Enum):
     LEGACY_PROGRESS_WITHOUT_INTENT = "propagation_wave_progress_without_intent"
     IMMUTABLE_INTENT_CONFLICT = "propagation_wave_immutable_intent_conflict"
     TRANSACTION_MISSING = "propagation_wave_transaction_missing"
+    TRANSACTION_GENERATION_MISMATCH = (
+        "propagation_wave_transaction_generation_mismatch"
+    )
     OWNERSHIP_LOST = "propagation_wave_ownership_lost"
 
 
@@ -63,6 +66,8 @@ _ERROR_MESSAGES: dict[PropagationWaveErrorCode, str] = {
         "Existing durable propagation intent conflicts with the requested operation.",
     PropagationWaveErrorCode.TRANSACTION_MISSING:
         "There is no active transaction in which to persist propagation intent.",
+    PropagationWaveErrorCode.TRANSACTION_GENERATION_MISMATCH:
+        "Propagation intent does not match the transaction credential generation.",
     PropagationWaveErrorCode.OWNERSHIP_LOST:
         "Current rotation execution ownership was not established before persisting intent.",
 }
@@ -115,7 +120,11 @@ class CandidatePropagationWave:
                             location_id=item.location.name,
                             expected_identity=item.expected_identity,
                             expected_target=item.expected_target,
-                            potential_restart_dependencies=item.location.restart,
+                            potential_restart_dependencies=(
+                                _canonical_restart_dependencies(
+                                    item.location.restart,
+                                )
+                            ),
                         )
                         for item in group.locations
                     ),
@@ -123,6 +132,12 @@ class CandidatePropagationWave:
                 for group in self.secret_groups
             ),
         )
+
+
+def _canonical_restart_dependencies(
+    dependencies: tuple[WorkloadRef, ...],
+) -> tuple[WorkloadRef, ...]:
+    return tuple(sorted(dependencies, key=lambda item: item.label))
 
 
 class LocationReconciliationDisposition(Enum):
@@ -235,7 +250,10 @@ def propagation_contract_digest(contract: CredentialContract) -> ConfigurationDi
                 "identity": location.identity.value,
                 "role": location.role.value,
                 "representation": _representation_document(location),
-                "restart": [item.label for item in location.restart],
+                "restart": [
+                    item.label
+                    for item in _canonical_restart_dependencies(location.restart)
+                ],
             }
             for location in sorted(contract.locations, key=lambda item: item.name)
         ],
@@ -534,6 +552,18 @@ def persist_propagation_wave_intent(
     intent = planned.wave.intent
     if intent is None:
         raise PropagationWaveError(PropagationWaveErrorCode.IMMUTABLE_INTENT_CONFLICT)
+    transaction_generation = (
+        transaction.new_b_sha256
+        if intent.target_identity is Identity.BREAKGLASS
+        else transaction.new_a_sha256
+    )
+    if (
+        transaction_generation is None
+        or transaction_generation != intent.target_generation
+    ):
+        raise PropagationWaveError(
+            PropagationWaveErrorCode.TRANSACTION_GENERATION_MISMATCH,
+        )
     current = _transaction_wave(transaction, intent.target_identity)
     if current.intent is not None:
         if current.intent != intent:

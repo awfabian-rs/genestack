@@ -8,9 +8,9 @@ import pytest
 from admin_password_rotation.config import parse_contract
 from admin_password_rotation.errors import SafeError
 from admin_password_rotation.model import (
-    CredentialGeneration, Identity, PersistentState, PropagationState,
-    PropagationWave, ReferenceCredentials, SecretField, SecretInventory,
-    SecretSnapshot, SecretValue,
+    CredentialContract, CredentialGeneration, Identity, PersistentState,
+    PropagationState, PropagationWave, ReferenceCredentials, SecretField,
+    SecretInventory, SecretSnapshot, SecretValue,
 )
 from admin_password_rotation.propagation import DesiredCredential
 from admin_password_rotation.propagation_wave import (
@@ -18,7 +18,8 @@ from admin_password_rotation.propagation_wave import (
     PropagationWaveErrorCode, PropagationWaveReconciliation,
     WaveReconciliationStatus,
     build_candidate_propagation_wave, persist_propagation_wave_intent,
-    plan_or_reconcile_propagation_wave, reconcile_propagation_wave,
+    plan_or_reconcile_propagation_wave, propagation_contract_digest,
+    reconcile_propagation_wave,
 )
 from admin_password_rotation.state import parse_state_json, serialize_state_json
 from admin_password_rotation.state_store import PersistedState, StateRevision, StateStore
@@ -30,6 +31,7 @@ BREAKGLASS = SecretValue(b"Synthetic-Breakglass-4B")
 REFERENCES = ReferenceCredentials(ADMIN, BREAKGLASS)
 ADMIN_GENERATION = CredentialGeneration.from_secret(ADMIN)
 BREAKGLASS_GENERATION = CredentialGeneration.from_secret(BREAKGLASS)
+OTHER_GENERATION = CredentialGeneration("sha256:" + "f" * 64)
 
 
 CONTRACT = """namespace: openstack
@@ -129,6 +131,21 @@ def generation(identity: Identity) -> CredentialGeneration:
     return BREAKGLASS_GENERATION if identity is Identity.BREAKGLASS else ADMIN_GENERATION
 
 
+def contract_with_unsorted_restarts() -> CredentialContract:
+    contract = parse_contract(CONTRACT)
+    locations = tuple(
+        replace(location, restart=tuple(reversed(location.restart)))
+        if location.name == "active-two" else location
+        for location in contract.locations
+    )
+    result = replace(contract, locations=locations)
+    active_two = next(item for item in result.locations if item.name == "active-two")
+    assert tuple(item.label for item in active_two.restart) == (
+        "deployment/shared-api", "daemonset/shared-agent",
+    )
+    return result
+
+
 def plan(
     identity: Identity = Identity.BREAKGLASS,
     inventory: SecretInventory | None = None,
@@ -224,6 +241,60 @@ def test_grouping_and_serialized_intent_order_are_deterministic() -> None:
     assert tuple(group.secret_name for group in first.secret_groups) == (
         "separate-consumer", "shared-consumers",
     )
+
+
+def test_restart_dependencies_are_canonical_in_durable_intent_and_round_trip() -> None:
+    contract = contract_with_unsorted_restarts()
+    planned = plan_or_reconcile_propagation_wave(
+        contract, observed_inventory(), REFERENCES,
+        desired(Identity.BREAKGLASS), BREAKGLASS_GENERATION,
+        PropagationWave((), ()),
+    )
+    assert planned.wave.intent is not None
+    active_two = next(
+        location
+        for group in planned.wave.intent.secret_groups
+        for location in group.locations
+        if location.location_id == "active-two"
+    )
+    assert tuple(
+        item.label for item in active_two.potential_restart_dependencies
+    ) == ("daemonset/shared-agent", "deployment/shared-api")
+
+    state = realistic_state()
+    assert state.current_transaction is not None
+    transaction = replace(
+        state.current_transaction,
+        new_b_sha256=BREAKGLASS_GENERATION,
+        credential_mutation_intent=None,
+        propagation=replace(
+            state.current_transaction.propagation,
+            to_b=planned.wave,
+        ),
+    )
+    serialized = serialize_state_json(replace(
+        state, current_transaction=transaction,
+    ))
+    restored = parse_state_json(serialized)
+    assert restored.current_transaction is not None
+    assert restored.current_transaction.propagation.to_b.intent == planned.wave.intent
+
+
+def test_restart_order_does_not_change_plan_or_contract_digest() -> None:
+    canonical_contract = parse_contract(CONTRACT)
+    unsorted_contract = contract_with_unsorted_restarts()
+    canonical = build_candidate_propagation_wave(
+        canonical_contract, observed_inventory(), REFERENCES,
+        desired(Identity.BREAKGLASS), BREAKGLASS_GENERATION,
+    ).durable_intent()
+    unsorted = build_candidate_propagation_wave(
+        unsorted_contract, observed_inventory(), REFERENCES,
+        desired(Identity.BREAKGLASS), BREAKGLASS_GENERATION,
+    ).durable_intent()
+    assert propagation_contract_digest(unsorted_contract) == (
+        propagation_contract_digest(canonical_contract)
+    )
+    assert unsorted == canonical
 
 
 def test_restart_metadata_is_potential_only_and_creates_no_action_debt() -> None:
@@ -495,12 +566,16 @@ class Ownership:
             raise SafeError("ownership_lost", "ownership lost")
 
 
-def transaction_state() -> PersistedState:
+def transaction_state(
+    *, new_a: CredentialGeneration | None = None,
+    new_b: CredentialGeneration | None = BREAKGLASS_GENERATION,
+) -> PersistedState:
     state = realistic_state()
     assert state.current_transaction is not None
     transaction = replace(
         state.current_transaction,
-        new_b_sha256=BREAKGLASS_GENERATION,
+        new_a_sha256=new_a,
+        new_b_sha256=new_b,
         credential_mutation_intent=None,
         propagation=PropagationState(PropagationWave((), ()), PropagationWave((), ())),
     )
@@ -549,6 +624,83 @@ def test_new_intent_is_not_persisted_after_ownership_loss() -> None:
         )
     assert raised.value.kind is PropagationWaveErrorCode.OWNERSHIP_LOST
     assert store.update_count == 0
+
+
+def test_breakglass_intent_rejects_transaction_generation_mismatch() -> None:
+    planned = plan_or_reconcile_propagation_wave(
+        parse_contract(CONTRACT), observed_inventory(), REFERENCES,
+        desired(Identity.BREAKGLASS), BREAKGLASS_GENERATION,
+        PropagationWave((), ()),
+    )
+    store = MemoryStateStore(transaction_state(new_b=OTHER_GENERATION))
+    owner = Ownership()
+    with pytest.raises(PropagationWaveError) as raised:
+        persist_propagation_wave_intent(
+            store, owner, store.current, planned,
+            recorded_at=datetime(2026, 10, 5, 12, tzinfo=timezone.utc),
+        )
+    assert raised.value.kind is (
+        PropagationWaveErrorCode.TRANSACTION_GENERATION_MISMATCH
+    )
+    assert owner.assertions == 0
+    assert store.update_count == 0
+
+
+def test_admin_intent_requires_established_transaction_generation() -> None:
+    planned = plan_or_reconcile_propagation_wave(
+        parse_contract(CONTRACT), observed_inventory(), REFERENCES,
+        desired(Identity.ADMIN), ADMIN_GENERATION, PropagationWave((), ()),
+    )
+    store = MemoryStateStore(transaction_state(new_a=None))
+    owner = Ownership()
+    with pytest.raises(PropagationWaveError) as raised:
+        persist_propagation_wave_intent(
+            store, owner, store.current, planned,
+            recorded_at=datetime(2026, 10, 5, 12, tzinfo=timezone.utc),
+        )
+    assert raised.value.kind is (
+        PropagationWaveErrorCode.TRANSACTION_GENERATION_MISMATCH
+    )
+    assert owner.assertions == 0
+    assert store.update_count == 0
+
+
+def test_admin_intent_rejects_transaction_generation_mismatch() -> None:
+    planned = plan_or_reconcile_propagation_wave(
+        parse_contract(CONTRACT), observed_inventory(), REFERENCES,
+        desired(Identity.ADMIN), ADMIN_GENERATION, PropagationWave((), ()),
+    )
+    store = MemoryStateStore(transaction_state(new_a=OTHER_GENERATION))
+    owner = Ownership()
+    with pytest.raises(PropagationWaveError) as raised:
+        persist_propagation_wave_intent(
+            store, owner, store.current, planned,
+            recorded_at=datetime(2026, 10, 5, 12, tzinfo=timezone.utc),
+        )
+    assert raised.value.kind is (
+        PropagationWaveErrorCode.TRANSACTION_GENERATION_MISMATCH
+    )
+    assert owner.assertions == 0
+    assert store.update_count == 0
+
+
+def test_admin_intent_persists_when_transaction_generation_matches() -> None:
+    planned = plan_or_reconcile_propagation_wave(
+        parse_contract(CONTRACT), observed_inventory(), REFERENCES,
+        desired(Identity.ADMIN), ADMIN_GENERATION, PropagationWave((), ()),
+    )
+    store = MemoryStateStore(transaction_state(new_a=ADMIN_GENERATION))
+    owner = Ownership()
+    persisted = persist_propagation_wave_intent(
+        store, owner, store.current, planned,
+        recorded_at=datetime(2026, 10, 5, 12, tzinfo=timezone.utc),
+    )
+    assert owner.assertions == 1
+    assert store.update_count == 1
+    assert persisted.state.current_transaction is not None
+    assert persisted.state.current_transaction.propagation.to_a.intent == (
+        planned.wave.intent
+    )
 
 
 def test_planning_and_reconciliation_do_not_mutate_secrets_or_create_restarts() -> None:
