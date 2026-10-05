@@ -36,8 +36,11 @@ Slice 4A adds a library primitive that safely mutates one validated contracted
 credential. It structurally updates fields, INI, direct YAML, or nested YAML;
 requires a recognized caller-permitted observed state; revalidates current
 execution ownership; uses Secret UID/resourceVersion preconditions; and rereads,
-reparses, and verifies the exact target. Results distinguish changed from no-op
-and retain configured restart metadata without executing it. Conflicts, unsafe
+reparses, and verifies the exact target. Candidate no-ops also revalidate
+ownership and freshly verify the same Secret UID and target credential before
+returning `UNCHANGED`. The caller must supply a target credential already proven
+authoritative by its higher-level reconciliation. Results distinguish changed
+from no-op and retain configured restart metadata without executing it. Conflicts, unsafe
 observations, Kubernetes failures, ambiguous writes, and verification failures
 are typed, credential-free errors.
 

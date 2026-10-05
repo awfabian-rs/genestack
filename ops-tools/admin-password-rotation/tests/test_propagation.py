@@ -14,7 +14,8 @@ from admin_password_rotation.model import (
 from admin_password_rotation.propagation import (
     ClassifiedCredentialLocation, CredentialMutationDisposition, CredentialMutationError,
     CredentialMutationErrorCode, CredentialMutationResult, DesiredCredential,
-    CredentialSecretClientErrorCode, FakeCredentialSecretClient,
+    CredentialSecretClientError, CredentialSecretClientErrorCode,
+    FakeCredentialSecretClient,
     KubernetesApiCredentialSecretClient, classify_credential_location,
     mutate_credential_location,
 )
@@ -205,8 +206,60 @@ def test_already_at_exact_target_is_noop_without_write_or_restart_debt() -> None
     assert result.restart_dependencies == RESTART
     assert result.required_restart_dependencies == ()
     assert client.replace_calls == 0
-    assert client.read_calls == 0
-    assert owner.assertions == 0
+    assert client.read_calls == 1
+    assert owner.assertions == 1
+
+
+def test_noop_does_not_trust_stale_classified_target_snapshot() -> None:
+    configured = location(FieldsRepresentation("OS_PASSWORD", "OS_USERNAME"))
+    classified_target = secret("consumer", {
+        "OS_PASSWORD": BREAKGLASS.reveal(), "OS_USERNAME": b"breakglass",
+    })
+    changed_live = replace(
+        classified_target,
+        resource_version="124",
+        data=(
+            SecretField("OS_PASSWORD", ADMIN),
+            SecretField("OS_USERNAME", SecretValue(b"admin")),
+        ),
+    )
+    client = FakeCredentialSecretClient(changed_live)
+    owner = Ownership()
+
+    with pytest.raises(CredentialMutationError) as raised:
+        mutate_credential_location(
+            client, owner,
+            observed=classified(configured, classified_target),
+            desired=DesiredCredential(Identity.BREAKGLASS, BREAKGLASS),
+            allowed_observed_identities=frozenset({Identity.BREAKGLASS}),
+        )
+
+    assert raised.value.kind is CredentialMutationErrorCode.CONFLICT
+    assert client.read_calls == 1
+    assert client.replace_calls == 0
+    assert owner.assertions == 1
+
+
+def test_noop_rejects_recreated_secret_even_when_target_still_matches() -> None:
+    configured = location(FieldsRepresentation("OS_PASSWORD", "OS_USERNAME"))
+    classified_target = secret("consumer", {
+        "OS_PASSWORD": BREAKGLASS.reveal(), "OS_USERNAME": b"breakglass",
+    })
+    client = FakeCredentialSecretClient(replace(
+        classified_target, uid="replacement-uid", resource_version="1",
+    ))
+
+    with pytest.raises(CredentialMutationError) as raised:
+        mutate_credential_location(
+            client, Ownership(),
+            observed=classified(configured, classified_target),
+            desired=DesiredCredential(Identity.BREAKGLASS, BREAKGLASS),
+            allowed_observed_identities=frozenset({Identity.BREAKGLASS}),
+        )
+
+    assert raised.value.kind is CredentialMutationErrorCode.CONFLICT
+    assert client.read_calls == 1
+    assert client.replace_calls == 0
 
 
 def test_fixed_admin_location_cannot_be_switched_to_breakglass() -> None:
@@ -475,6 +528,12 @@ class Serializer:
         return value
 
 
+class ApiStatusError(Exception):
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__("Kubernetes API request failed; response withheld.")
+
+
 class Api:
     def __init__(self) -> None:
         self.resource: dict[str, object] = {
@@ -490,6 +549,7 @@ class Api:
             },
         }
         self.patch: list[dict[str, object]] | None = None
+        self.patch_status: int | None = None
 
     def read_namespaced_secret(
         self, name: str, namespace: str, **kwargs: object,
@@ -504,6 +564,8 @@ class Api:
         assert (namespace, name) == ("openstack", "consumer")
         assert kwargs["_content_type"] == "application/json-patch+json"
         self.patch = body
+        if self.patch_status is not None:
+            raise ApiStatusError(self.patch_status)
         return {}
 
 
@@ -526,3 +588,27 @@ def test_kubernetes_patch_is_uid_resource_version_conditional_and_narrow() -> No
     paths = {str(item["path"]) for item in api.patch[2:]}
     assert paths == {"/data/OS_USERNAME", "/data/OS_PASSWORD"}
     assert "/data/unrelated" not in paths
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (409, CredentialSecretClientErrorCode.CONDITIONAL_REJECTED),
+        (412, CredentialSecretClientErrorCode.CONDITIONAL_REJECTED),
+        (422, CredentialSecretClientErrorCode.FAILURE),
+    ],
+)
+def test_kubernetes_patch_does_not_treat_every_422_as_conflict(
+    status: int, expected: CredentialSecretClientErrorCode,
+) -> None:
+    api = Api()
+    api.patch_status = status
+    client = KubernetesApiCredentialSecretClient(api, Serializer())
+    observed = client.read("openstack", "consumer")
+
+    with pytest.raises(CredentialSecretClientError) as raised:
+        client.conditional_replace(observed, (
+            SecretField("OS_PASSWORD", BREAKGLASS),
+        ))
+
+    assert raised.value.kind is expected

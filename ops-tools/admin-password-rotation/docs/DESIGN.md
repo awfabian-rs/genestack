@@ -512,6 +512,8 @@ hold valid current ownership and must revalidate it with the existing ownership
 assertion immediately before the correctness-sensitive write; optimistic
 concurrency does not replace that assertion. Slice 4A does not acquire, renew, or
 release the Lease and does not own the overall A -> B -> A state machine.
+The no-op decision is also correctness-sensitive: a candidate no-op revalidates
+ownership before freshly reading and verifying current Secret reality.
 
 Structural mutation may change only the declared username/password selectors
 required for the requested target credential. All unrelated configuration must
@@ -531,21 +533,32 @@ target. A location may be mutated only from a state permitted by the current
 higher-level transition and its validated caller intent. An unknown or unexplained
 credential must fail closed rather than being treated as "needs update." If the
 same intended credential is already present in a permitted state, the result is a
-no-op: no mutation occurred and that invocation contributes no restart dependency.
-Only an actually changed location may contribute its configured restart edges to
-a later runtime subslice.
+no-op only after ownership revalidation and a fresh read proves the same Secret
+UID still contains the exact intended credential. A stale classified snapshot is
+never sufficient proof of convergence. No mutation occurred and that invocation
+contributes no restart dependency. Only an actually changed location may
+contribute its configured restart edges to a later runtime subslice.
 
 `classify_credential_location()` converts a successfully parsed exact admin or
 breakglass match into `ClassifiedCredentialLocation`; unknown, unverified, or
 unresolvable state never becomes a mutation input. `DesiredCredential` carries a
-redacted target value and identity. `mutate_credential_location()` additionally
+redacted target value and identity, but construction does not prove that pairing
+is authoritative. The higher-level transition must first reconcile/authenticate
+the relevant admin or breakglass source and then supply that proven current
+credential. No existing source type alone proves that cross-system fact, so Slice
+4A deliberately keeps this as an explicit caller precondition rather than adding
+a misleading credential wrapper. `mutate_credential_location()` additionally
 requires the caller's explicitly permitted observed identities, rejects source
 locations and identity-binding violations, and calls the supplied ownership guard
-immediately before the write.
+before either a no-op verification read or a write.
 
 `KubernetesApiCredentialSecretClient` replaces only changed Secret data entries
 with one JSON Patch guarded by atomic UID and resourceVersion tests. It never
-retries a rejected or ambiguous write. `CredentialMutationResult` reports
+retries a rejected or ambiguous write. HTTP 409 and 412 responses are classified
+as conditional rejection; HTTP 422 remains a generic Kubernetes failure because
+the available exception fields do not robustly distinguish a failed JSON Patch
+`test` from unrelated validation errors without parsing fragile message text.
+`CredentialMutationResult` reports
 `CHANGED` or `UNCHANGED`, target identity, location, and configured restart
 dependencies; `required_restart_dependencies` is empty for no-op results. Stable
 `CredentialMutationErrorCode` values distinguish unsafe state, conflicts,

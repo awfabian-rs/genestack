@@ -67,6 +67,14 @@ class CredentialMutationError(SafeError):
 
 @dataclass(frozen=True, repr=False)
 class DesiredCredential:
+    """Caller-validated authoritative target; construction proves no authority.
+
+    The higher-level transition must establish that ``password`` is the current
+    authoritative/reconciled value for ``identity`` before constructing this
+    boundary value.  This type's responsibility is redaction and explicit
+    identity labeling, not authentication or external-state reconciliation.
+    """
+
     identity: Identity
     password: SecretValue = field(repr=False)
 
@@ -284,7 +292,7 @@ class KubernetesApiCredentialSecretClient:
             )
         except Exception as exc:
             status = _http_status(exc)
-            if status in (409, 412, 422):
+            if status in (409, 412):
                 kind = CredentialSecretClientErrorCode.CONDITIONAL_REJECTED
             elif status is None or status == 429 or status >= 500:
                 kind = CredentialSecretClientErrorCode.OUTCOME_AMBIGUOUS
@@ -321,12 +329,25 @@ def _matches_target(
     )
 
 
+def _assert_owned(ownership: OwnershipGuard) -> None:
+    try:
+        ownership.assert_owned()
+    except SafeError:
+        raise CredentialMutationError(CredentialMutationErrorCode.OWNERSHIP_LOST) from None
+
+
 def mutate_credential_location(
     client: CredentialSecretClient, ownership: OwnershipGuard, *,
     observed: ClassifiedCredentialLocation, desired: DesiredCredential,
     allowed_observed_identities: frozenset[Identity],
 ) -> CredentialMutationResult:
-    """Converge one recognized propagated location to an explicitly allowed target."""
+    """Converge one recognized propagated location to a caller-validated target.
+
+    ``desired`` must already be the authoritative/reconciled credential for its
+    labeled identity.  This one-location primitive does not establish that
+    external fact; it validates the contracted location and safely propagates
+    the supplied target.
+    """
     location = observed.location
     if location.role is not LocationRole.PROPAGATED:
         raise CredentialMutationError(CredentialMutationErrorCode.SOURCE_LOCATION)
@@ -337,6 +358,28 @@ def mutate_credential_location(
 
     try:
         if _matches_target(location, observed.secret, desired):
+            _assert_owned(ownership)
+            try:
+                current = client.read(
+                    observed.secret.namespace, observed.secret.name,
+                )
+            except CredentialSecretClientError as exc:
+                kind = (
+                    CredentialMutationErrorCode.CONFLICT
+                    if exc.kind is CredentialSecretClientErrorCode.NOT_FOUND
+                    else CredentialMutationErrorCode.KUBERNETES_FAILURE
+                )
+                raise CredentialMutationError(kind) from None
+            if current.uid != observed.secret.uid:
+                raise CredentialMutationError(CredentialMutationErrorCode.CONFLICT)
+            try:
+                current_matches = _matches_target(location, current, desired)
+            except RepresentationError:
+                raise CredentialMutationError(
+                    CredentialMutationErrorCode.REPRESENTATION_INVALID,
+                ) from None
+            if not current_matches:
+                raise CredentialMutationError(CredentialMutationErrorCode.CONFLICT)
             return CredentialMutationResult(
                 location.name, location.secret,
                 CredentialMutationDisposition.UNCHANGED, desired.identity,
@@ -353,10 +396,7 @@ def mutate_credential_location(
         # must agree.  Treat disagreement as unsafe rather than issuing a write.
         raise CredentialMutationError(CredentialMutationErrorCode.REPRESENTATION_INVALID)
 
-    try:
-        ownership.assert_owned()
-    except SafeError:
-        raise CredentialMutationError(CredentialMutationErrorCode.OWNERSHIP_LOST) from None
+    _assert_owned(ownership)
 
     try:
         client.conditional_replace(observed.secret, replacements)

@@ -610,6 +610,9 @@ immediately before the correctness-sensitive Secret write. UID/resourceVersion
 tests are additionally mandatory and do not replace Lease ownership. Acquiring,
 renewing, and releasing the Lease—and orchestrating the overall A -> B -> A state
 machine—remain outside the one-location Slice 4A primitive.
+Candidate no-ops are also correctness-sensitive: revalidate ownership, freshly
+read the Secret, require the expected UID, and reparse and compare the exact
+target before returning `UNCHANGED`.
 
 The mutation may alter only the username/password components selected by the
 location's representation. All unrelated configuration must remain semantically
@@ -633,9 +636,18 @@ Fail closed on credential state. Difference from the target does not by itself
 authorize an overwrite. Mutation is allowed only from an observed state permitted
 by the current higher-level transition and caller-provided validated intent;
 unknown or unexplained state is failure. If a permitted location is already at
-the target, report no-op without writing it. That invocation contributes no
-restart consequence. Only a location reported changed may contribute its
-configured restart dependencies to a later runtime subslice.
+the target, its classified snapshot is only a no-op candidate. Report no-op
+without writing only after a fresh read proves the same Secret UID still has the
+exact target credential. That invocation contributes no restart consequence.
+Only a location reported changed may contribute its configured restart
+dependencies to a later runtime subslice.
+
+`DesiredCredential` does not establish that an arbitrary password belongs to its
+identity label. The higher-level transition is responsible for proving through
+its existing reconciliation/authentication path that the supplied value is the
+current authoritative admin or breakglass credential. There is no existing
+single source type that proves this cross-system fact, so Slice 4A documents the
+caller precondition instead of introducing another credential framework.
 
 Reuse the checked-in representation and contract model rather than introducing a
 parallel schema:
@@ -654,6 +666,12 @@ parallel schema:
   JSON Patch discipline and read-after-write safety, but its breeder-specific
   client and provenance must remain source-only rather than being generalized by
   accident.
+
+The Kubernetes client exposes status, reason, headers, and body for API errors,
+but no stable structured field distinguishes a JSON Patch `test` failure from
+other HTTP 422 validation failures. Slice 4A therefore treats 409/412 as
+conditional rejection and 422 as generic Kubernetes failure; it does not parse
+human-readable server messages to claim a concurrency conflict.
 
 Slice 4A supports `fields`, `ini`, `yaml`, and nested YAML/`document_path`.
 It must not execute any `CredentialLocation.restart` dependency, restart or wait
