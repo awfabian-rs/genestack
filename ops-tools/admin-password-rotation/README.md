@@ -43,8 +43,14 @@ engine**: safely mutate one validated contracted propagated location to an
 explicitly requested allowed identity/credential using the existing fields, INI,
 YAML, and nested-YAML representation model. It must provide structural mutation,
 identity/state validation, optimistic concurrency, read-after-write verification,
-and changed/no-op/failure reporting. Slice 4A does not restart workloads, execute
-or verify either cutover, or finalize the transaction.
+and changed/no-op/failure reporting. The mutating caller must hold and immediately
+revalidate current rotation execution ownership; Secret UID/resourceVersion
+checks are an additional object-state guard, not a substitute for ownership. Only
+declared credential selectors may change, unrelated configuration remains
+semantically invariant, and read-back must verify the same Secret UID plus the
+exact intended credential. Unknown state fails closed. A no-op contributes no
+restart consequence. Slice 4A does not restart workloads, execute or verify either
+cutover, or finalize the transaction.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
 clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl

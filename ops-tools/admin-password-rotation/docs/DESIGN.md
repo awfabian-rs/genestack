@@ -499,6 +499,38 @@ fresh read-after-write verification
 changed / no-op / failure reporting
 ```
 
+Rotation execution ownership and Kubernetes object concurrency are separate
+requirements. The Lease/current execution determines whether this execution is
+authorized to perform a rotation mutation. The Secret UID and `resourceVersion`
+tests determine whether the named object is still the exact object and observed
+state on which the mutation decision was based. A mutating caller must already
+hold valid current ownership and must revalidate it with the existing ownership
+assertion immediately before the correctness-sensitive write; optimistic
+concurrency does not replace that assertion. Slice 4A does not acquire, renew, or
+release the Lease and does not own the overall A -> B -> A state machine.
+
+Structural mutation may change only the declared username/password selectors
+required for the requested target credential. All unrelated configuration must
+remain semantically invariant, including other content in `octavia.conf`,
+`blazar.conf`, `clouds.yaml`, and embedded generated `clouds.yaml` documents. This
+is not arbitrary document rewriting or textual search-and-replace. Serialization
+may make harmless formatting changes where byte-preserving output is not
+guaranteed; it must not change unrelated configuration semantics.
+
+After a write, Slice 4A must freshly reread the Secret, require the expected UID,
+resolve the declared representation successfully, and verify the exact intended
+target credential. A successful Kubernetes write response is not verification,
+and matching content in a deleted and recreated same-name Secret is not success.
+
+Observed state is an authorization input, not merely a comparison with the
+target. A location may be mutated only from a state permitted by the current
+higher-level transition and its validated caller intent. An unknown or unexplained
+credential must fail closed rather than being treated as "needs update." If the
+same intended credential is already present in a permitted state, the result is a
+no-op: no mutation occurred and that invocation contributes no restart dependency.
+Only an actually changed location may contribute its configured restart edges to
+a later runtime subslice.
+
 It does not execute restart dependencies, orchestrate `SWITCH_TO_B` or
 `SWITCH_TO_A`, run `VERIFY_B` or `VERIFY_A`, wait for rollouts, or finalize the
 transaction. Those are later Slice 4 subslices. The contract-driven restart edges

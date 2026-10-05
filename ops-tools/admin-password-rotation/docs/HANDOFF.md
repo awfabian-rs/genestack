@@ -582,6 +582,49 @@ location's declared selectors, validate identity and observed state, use Secret
 UID/resourceVersion optimistic concurrency, read the Secret back, verify the
 exact declared credential, and report changed, no-op, or failure.
 
+Keep execution authorization distinct from object concurrency:
+
+```text
+Lease/current execution ownership
+    -> authorizes this execution to perform rotation mutation
+
+Secret UID/resourceVersion tests
+    -> prove the object and observed state still match the mutation decision
+```
+
+The mutating caller must hold valid current rotation execution ownership and
+revalidate it through the existing `LeaseOwnership.assert_owned()` boundary
+immediately before the correctness-sensitive Secret write. UID/resourceVersion
+tests are additionally mandatory and do not replace Lease ownership. Acquiring,
+renewing, and releasing the Lease—and orchestrating the overall A -> B -> A state
+machine—remain outside the one-location Slice 4A primitive.
+
+The mutation may alter only the username/password components selected by the
+location's representation. All unrelated configuration must remain semantically
+unchanged, especially within `octavia.conf`, `blazar.conf`, `clouds.yaml`, and
+embedded generated `clouds.yaml`. Do not use textual search-and-replace or treat
+the whole document as disposable. Harmless serialization formatting changes are
+acceptable where byte preservation is not guaranteed, but unrelated semantic
+configuration changes are not.
+
+After mutation, freshly reread the Secret and require all of the following:
+
+- it is still the intended object;
+- its UID equals the expected UID;
+- the declared representation resolves successfully;
+- the resolved credential exactly equals the intended target credential.
+
+A successful write response alone is insufficient. Matching content from a
+deleted and recreated same-name Secret does not verify the original mutation.
+
+Fail closed on credential state. Difference from the target does not by itself
+authorize an overwrite. Mutation is allowed only from an observed state permitted
+by the current higher-level transition and caller-provided validated intent;
+unknown or unexplained state is failure. If a permitted location is already at
+the target, report no-op without writing it. That invocation contributes no
+restart consequence. Only a location reported changed may contribute its
+configured restart dependencies to a later runtime subslice.
+
 Reuse the checked-in representation and contract model rather than introducing a
 parallel schema:
 
