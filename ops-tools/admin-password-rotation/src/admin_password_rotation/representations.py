@@ -1,14 +1,15 @@
-"""Read exact structural credential selectors. Nothing here writes configuration."""
+"""Read and structurally mutate exact credential selectors."""
 from __future__ import annotations
 
 import configparser
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .errors import RepresentationError
 from .model import (
     FieldsRepresentation, IniRepresentation, ObservedCredential, Representation,
-    SecretSnapshot, SecretValue, YamlRepresentation,
+    SecretField, SecretSnapshot, SecretValue, YamlRepresentation,
 )
 from .syntax import MAX_DOCUMENT_BYTES, Scalar, YamlValue, parse_yaml, resolve, string
 
@@ -129,3 +130,145 @@ def read_credential(secret: SecretSnapshot, rep: Representation) -> ObservedCred
         password = credential_string(string(resolve(document, rep.password_path)))
         username = None if rep.username_path is None else credential_string(string(resolve(document, rep.username_path)))
     return ObservedCredential(username, SecretValue(password.encode("utf-8")))
+
+
+def _replace_spans(
+    text: str, replacements: tuple[tuple[int, int, str], ...],
+) -> str:
+    ordered = sorted(replacements, key=lambda item: item[0])
+    previous_end = -1
+    for start, end, _value in ordered:
+        if start < 0 or end < start or end > len(text) or start < previous_end:
+            raise RepresentationError(
+                "overlapping_credential_selectors",
+                "Declared credential selectors do not identify disjoint source spans.",
+            )
+        previous_end = end
+    result = text
+    for start, end, value in reversed(ordered):
+        result = result[:start] + value + result[end:]
+    return result
+
+
+def _yaml_string(value: str) -> str:
+    # JSON strings are valid YAML strings and give us a small, deterministic,
+    # constructor-free scalar serializer.  In particular, punctuation and
+    # control characters can never turn the replacement into YAML structure.
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _with_fields(
+    secret: SecretSnapshot, replacements: tuple[SecretField, ...],
+) -> SecretSnapshot:
+    by_key = {item.key: item for item in secret.data}
+    by_key.update({item.key: item for item in replacements})
+    return replace(secret, data=tuple(sorted(by_key.values(), key=lambda item: item.key)))
+
+
+def mutate_credential_fields(
+    secret: SecretSnapshot, rep: Representation, *, username: str,
+    password: SecretValue,
+) -> tuple[SecretField, ...]:
+    """Build minimal Secret-field replacements for one declared credential.
+
+    The returned fields are suitable for an atomic conditional patch.  Direct
+    fields are replaced individually.  INI and YAML documents are changed only
+    at the source spans of their declared credential selectors.  Embedded YAML
+    is serialized back into its one declared outer scalar after the inner leaf
+    changes have been applied.
+    """
+    target_username = credential_string(username)
+    try:
+        target_password = credential_string(password.reveal().decode("utf-8"))
+    except UnicodeDecodeError:
+        raise RepresentationError(
+            "invalid_credential_string",
+            "Credential values must be valid UTF-8 text.",
+        ) from None
+
+    current = read_credential(secret, rep)
+    replacements: tuple[SecretField, ...]
+    if isinstance(rep, FieldsRepresentation):
+        changed: list[SecretField] = []
+        if current.password.reveal() != password.reveal():
+            changed.append(SecretField(rep.password, password))
+        if rep.username is not None and current.username != target_username:
+            changed.append(SecretField(
+                rep.username, SecretValue(target_username.encode("utf-8")),
+            ))
+        replacements = tuple(changed)
+    elif isinstance(rep, IniRepresentation):
+        text = text_field(secret, rep.key)
+        document = parse_ini(text)
+        spans: list[tuple[int, int, str]] = []
+        if current.password.reveal() != password.reveal():
+            start, end = document.span(rep.section, rep.password)
+            spans.append((start, end, target_password))
+        if rep.username is not None and current.username != target_username:
+            start, end = document.span(rep.section, rep.username)
+            spans.append((start, end, target_username))
+        mutated = _replace_spans(text, tuple(spans))
+        replacements = (
+            () if mutated == text else (
+                SecretField(rep.key, SecretValue(mutated.encode("utf-8"))),
+            )
+        )
+    else:
+        text = text_field(secret, rep.key)
+        _outer, inner_text, document, embedded = yaml_document(text, rep)
+        spans = []
+        if current.password.reveal() != password.reveal():
+            node = resolve(document, rep.password_path)
+            string(node)
+            if not isinstance(node, Scalar):
+                raise RepresentationError("expected_string", "Expected a YAML string credential.")
+            spans.append((node.start, node.end, _yaml_string(target_password)))
+        if rep.username_path is not None and current.username != target_username:
+            node = resolve(document, rep.username_path)
+            string(node)
+            if not isinstance(node, Scalar):
+                raise RepresentationError("expected_string", "Expected a YAML string credential.")
+            spans.append((node.start, node.end, _yaml_string(target_username)))
+        mutated_inner = _replace_spans(inner_text, tuple(spans))
+        if embedded is None:
+            mutated = mutated_inner
+        elif mutated_inner == inner_text:
+            mutated = text
+        else:
+            # Replacing precisely the declared embedded-document scalar leaves
+            # all other outer-document bytes untouched.
+            original_scalar = text[embedded.start:embedded.end]
+            terminator = (
+                "\r\n" if original_scalar.endswith("\r\n")
+                else "\n" if original_scalar.endswith("\n")
+                else ""
+            )
+            mutated = _replace_spans(text, (
+                (
+                    embedded.start, embedded.end,
+                    _yaml_string(mutated_inner) + terminator,
+                ),
+            ))
+        replacements = (
+            () if mutated == text else (
+                SecretField(rep.key, SecretValue(mutated.encode("utf-8"))),
+            )
+        )
+
+    # A serializer result is never trusted without reparsing it through the
+    # same representation boundary used by discovery.
+    reparsed = read_credential(_with_fields(secret, replacements), rep)
+    expected_username = None if (
+        isinstance(rep, FieldsRepresentation) and rep.username is None
+        or isinstance(rep, IniRepresentation) and rep.username is None
+        or isinstance(rep, YamlRepresentation) and rep.username_path is None
+    ) else target_username
+    if (
+        reparsed.username != expected_username
+        or reparsed.password.reveal() != password.reveal()
+    ):
+        raise RepresentationError(
+            "mutation_round_trip_mismatch",
+            "Mutated credential representation did not round-trip safely.",
+        )
+    return replacements

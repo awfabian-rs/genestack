@@ -2,7 +2,7 @@
 
 ## Current project state
 
-This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E.
+This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slice 4A is complete.
 
 The project now includes mutation-capable library behavior.
 
@@ -77,6 +77,16 @@ Slice 3E
     password-only PasswordSafe admin update and read-after-write verification
     fresh observed A3 completion with forward-only interruption recovery
     immutable A-new generation and no breeder staging
+
+Slice 4A
+    typed classified propagated-location and redacted desired-credential inputs
+    structural fields, INI, direct YAML, and nested-YAML mutation
+    source and fixed-identity protection plus caller-permitted observed-state gate
+    current-ownership assertion immediately before mutation
+    UID/resourceVersion-conditional Secret JSON Patch
+    fresh read-after-write parse and exact-target verification
+    typed changed/no-op results with retained, unexecuted restart metadata
+    typed secret-safe conflict, unsafe-state, ambiguity, and verification failures
 ```
 
 The CLI remains primarily read-only/planning-oriented. PREPARE_B and the bounded
@@ -90,15 +100,17 @@ performs `SWITCH_TO_B` or `VERIFY_B`, and production execution must not enter
 `ROTATE_A` until `VERIFY_B` succeeds. Slice 3's independently invocable/testable
 primitives do not bypass or weaken that gate. Slice 3D changes only the admin
 lockout option and canonical breeder Secret, then stops at observed A1. Slice 3E
-converges the core A credential to observed A3. No implemented path propagates
-credentials to consumers, executes restart dependencies, waits for rollouts,
+converges the core A credential to observed A3. Slice 4A can mutate one already
+classified propagated location, but no implemented runner propagates a complete
+wave, executes restart dependencies, waits for rollouts,
 performs runtime/service cutover verification, restores consumers to admin,
 executes `SWITCH_TO_A` / `VERIFY_A`, restores lockout policy, or completes the
 transaction.
 
-The next task is **Slice 4A — credential propagation mutation engine**: generic
-structural mutation of one validated contracted propagated credential location.
-Do not implement restarts or phase orchestration in Slice 4A.
+The next Slice 4 work must build on the one-location primitive without folding
+runtime actions or phase orchestration into it. Complete-wave intent/progress,
+same-Secret grouping, restart-debt recovery, workload actions, and phase gates
+remain later work.
 
 ## Read these first
 
@@ -573,9 +585,9 @@ particular, A-new success plus old-A indeterminacy is not A2.
 
 Forward recovery is preferred over routine password rollback.
 
-## Next task: Slice 4A
+## Implemented Slice 4A
 
-Implement the credential propagation mutation engine. Its unit of work is one
+The credential propagation mutation engine's unit of work is one
 validated `CredentialLocation` whose `role` is `LocationRole.PROPAGATED`. Given an
 explicitly requested allowed identity/credential, it must structurally mutate the
 location's declared selectors, validate identity and observed state, use Secret
@@ -643,7 +655,7 @@ parallel schema:
   client and provenance must remain source-only rather than being generalized by
   accident.
 
-Slice 4A must support `fields`, `ini`, `yaml`, and nested YAML/`document_path`.
+Slice 4A supports `fields`, `ini`, `yaml`, and nested YAML/`document_path`.
 It must not execute any `CredentialLocation.restart` dependency, restart or wait
 for a workload, execute `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, or `VERIFY_A`,
 restore lockout policy, or finalize the transaction. Phase orchestration and
@@ -702,7 +714,9 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 ## Suggested next-agent task
 
-Implement only Slice 4A as bounded above. Do not wire a runner, execute restart
-dependencies, bypass `SWITCH_TO_B` / `VERIFY_B`, or treat Slice 3E's A3 as
-transaction completion. Runtime cutover, verification, lockout restoration,
-final completion, and packaging remain later work.
+Build the next bounded Slice 4 subslice on the completed one-location mutation
+primitive. Do not fold restart execution into `propagation.py`, bypass
+`SWITCH_TO_B` / `VERIFY_B`, or treat Slice 3E's A3 as transaction completion.
+Complete-wave intent/progress and same-Secret grouping should precede runtime
+action execution. Runtime cutover verification, lockout restoration, final
+completion, and packaging remain later work.
