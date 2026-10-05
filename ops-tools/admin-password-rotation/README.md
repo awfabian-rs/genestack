@@ -1,10 +1,11 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. The CLI currently provides topology inspection
-and planning only; lower-level durable state, Lease ownership, and
-external credential mutation clients are implemented but are not yet
-connected to rotation workflow orchestration.
+password-rotation tool. The CLI remains focused on topology inspection and
+planning. The library now includes durable transaction state, conditional
+Kubernetes persistence, cooperative Lease ownership, typed external mutation
+clients, the PREPARE_B workflow, and read-only A0-A3 reconciliation. There is no
+complete end-to-end rotation command yet.
 
 ```
 contract YAML -> validated immutable types -> Secret inventory
@@ -12,20 +13,25 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-There are no rotation commands, restart operations or workflow-driven credential
-writes. Slice 2B provides conditional transaction-state persistence, Slice 2C
-provides cooperative execution ownership, and Slice 3A provides typed direct-HTTP
-Keystone, Rackspace Identity and PasswordSafe client primitives. None is wired to
-the CLI. The Slice 2 boundaries use the Kubernetes Python API directly; Slice 3A
-uses `httpx`. The separate Slice 1 live planning adapter runs only `kubectl get
-secrets -o json` in an explicitly named context. Offline fixture mode does not
-invoke kubectl.
+Slices 1, 2A, 2B, 2C, 3A, 3B, and 3C are implemented. PREPARE_B is a real library
+workflow: it may update only the breakglass credential in PasswordSafe and
+Keystone, with durable intent, ownership checks, fresh observation, and
+postcondition verification. Slice 3C observes and reconciles A state without
+mutation. Neither workflow is exposed as an end-to-end CLI runner, and consumer
+propagation, runtime actions, A mutation, return propagation, and final
+verification remain unimplemented.
+
+The Slice 2 boundaries use the Kubernetes Python API directly, while the external
+clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl
+get secrets -o json` in an explicitly named context. Offline fixture mode does
+not invoke kubectl.
 
 Slice 3A PasswordSafe support is limited to Rackspace Identity token acquisition,
 current-credential JSON reads and password-only JSON updates. Historical
-PasswordSafe retrieval is not implemented in Slice 3A. Exact old-A history remains
-a deferred exceptional recovery capability from the implementation brief and will
-be implemented only if and when the later A-recovery slice requires it.
+PasswordSafe retrieval is not implemented. Exact old-A history remains a deferred
+exceptional recovery capability from the implementation brief; Slice 3C
+demonstrates that A0-A3 reconciliation does not require it, and no current client
+exposes `get_exact_history_version()`.
 
 The Lease defaults are a 120-second duration, 20-second renewal interval and
 60-second renewal deadline. This is cooperative ownership, not hard fencing:
@@ -34,30 +40,24 @@ service, so later workflow code must still reobserve and apply recovery gates.
 
 ## Install and run locally
 
-Use Python 3.12 or newer. The validation environment used Python 3.13.5;
-compatibility with other interpreter versions still needs a local/CI run.
+The project targets Python 3.12. Create and use the project-local virtual
+environment; project validation does not fall back to system Python.
 
 ```sh
 cd ops-tools/admin-password-rotation
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e '.[dev]'
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install -e '.[dev]'
 
-python -m pytest -q
-python -m pyright
-python -m admin_password_rotation --help
+./.venv/bin/python -m pyright
+./.venv/bin/python -m pytest -q
+./scripts/check.sh
+./.venv/bin/python -m admin_password_rotation --help
 ```
 
 The installed console command `admin-password-rotation` is equivalent to
-`python -m admin_password_rotation`. No root-level Genestack files need changing.
-The complete local check entry point is `./scripts/check.sh`.
-
-The complete local validation entry point is:
-
-    ./scripts/check.sh
-
-It runs the project's current Pyright, pytest, contract-validation, and
-planning smoke checks.
+`./.venv/bin/python -m admin_password_rotation`. No root-level Genestack files
+need changing. `./scripts/check.sh` is the complete local check entry point and
+runs the current Pyright, pytest, contract-validation, and planning smoke checks.
 
 ## Start without a cluster
 
@@ -65,14 +65,14 @@ Both committed snapshots contain **invented synthetic credentials and metadata**
 They are examples of SecretList API shape, not redacted production exports.
 
 ```sh
-admin-password-rotation validate-contract \
+./.venv/bin/admin-password-rotation validate-contract \
   --contract config/credential-contract.yaml
 
-admin-password-rotation plan \
+./.venv/bin/admin-password-rotation plan \
   --contract config/credential-contract.yaml \
   --snapshot tests/fixtures/dfw-dev-stable.json
 
-admin-password-rotation plan \
+./.venv/bin/admin-password-rotation plan \
   --contract config/credential-contract.prod.yaml \
   --snapshot tests/fixtures/prod-stable.json --format json
 ```
@@ -109,7 +109,7 @@ sensitive data to this process; read-only is not the same as low privilege.
 kubectl config get-contexts -o name
 
 # Replace LAB_CONTEXT with the context you deliberately selected.
-admin-password-rotation plan \
+./.venv/bin/admin-password-rotation plan \
   --contract config/credential-contract.yaml \
   --live --context LAB_CONTEXT --timeout 60 --format json
 ```
@@ -131,7 +131,7 @@ A snapshot may also be piped through stdin, avoiding a persistent raw export:
 ```sh
 set -o pipefail  # bash/zsh; do not ignore a failed upstream kubectl command
 kubectl --context LAB_CONTEXT -n openstack get secrets -o json |
-  admin-password-rotation plan \
+  ./.venv/bin/admin-password-rotation plan \
     --contract config/credential-contract.yaml --snapshot - --format json
 ```
 

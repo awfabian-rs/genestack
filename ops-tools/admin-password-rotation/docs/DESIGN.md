@@ -7,6 +7,7 @@ Status: Slices 1, 2A, 2B, 2C, 3A, 3B, and 3C are implemented.
 - Read-only A0/A1/A2/A3 credential-state observation and classification is
   implemented as a library boundary.
 - SWITCH_TO_B, A mutation, and all later orchestration remain unimplemented.
+- No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
 
@@ -41,8 +42,8 @@ restart properties. Unknown fields are rejected rather than silently ignored.
 Named representations are normalized at load time. Multiple disjoint credential
 locations can share a Secret or a document. Overlapping username/password selectors,
 mixed formats for one data field, and different embedded document roots within
-one field are rejected. These are conservative bootstrap constraints, not claims
-that the general design prohibits every such future extension.
+one field are rejected. These are conservative Slice 1 planning constraints, not
+claims that the general design prohibits every such future extension.
 
 ## Actual identity versus identity binding
 
@@ -62,8 +63,8 @@ breakglass authorization. Consequently:
   that authorize repair. The output observation labels distinguish these errors.
 
 `classify()` also accepts a B reference for unit testing and a future read-only
-integration, but supplying a reference still does not prove authentication. This
-bootstrap's CLI does not accept a password flag, credential file or environment
+integration, but supplying a reference still does not prove authentication. The
+planning CLI does not accept a password flag, credential file or environment
 variable as an alternative authority.
 
 ## Parsing decisions
@@ -89,7 +90,7 @@ section, not silently inherited from DEFAULT, and must be single-line. Blazar's
 explicit DEFAULT options are supported. A small lexical span finder verifies the
 selected value against ConfigParser so the audit masks only that option. Repeated
 options elsewhere in an oslo.config file may be valid to that service but are
-rejected by this bootstrap parser: test real sanitized shapes before expanding
+rejected by the Slice 1 parser: test real sanitized shapes before expanding
 compatibility. No serializer or mutation method is included.
 
 ## Bounded extra-copy audit
@@ -136,21 +137,32 @@ ownership and reread relevant state; a saved report cannot be applied.
 
 ## Durable transaction state
 
-Schema version 2 defines the future contents of
-`Secret/openstack/keystone-admin-rotation-state` at `data/state.json`. This slice
-stores that document in a precreated infrastructure Secret; it does not create the
-Secret or perform rotation work. Lease ownership is a separate Slice 2C library
+Schema version 2 defines the contents of
+`Secret/openstack/keystone-admin-rotation-state` at `data/state.json`. Slice 2B
+stores that document in a precreated infrastructure Secret; it does not create
+the Secret or perform rotation work. Lease ownership is a separate Slice 2C library
 boundary. The planning CLI remains read-only and invokes neither boundary.
 
 The state is durable transaction memory, not authority over external reality.
 Recorded progress may lag an effect that completed before the next state update.
 For that reason the model keeps one explicit current credential-mutation intent,
 its observed-effect state, both propagation waves, lockout intent/observations and
-bounded latest verification results. Future executors must follow:
+bounded latest verification results. Consequential mutation workflows follow:
 
 ```
-persist intent -> perform effect -> read/verify actual state -> record progress
+persist pre-dispatch intent
+    -> assert current ownership
+    -> record DISPATCH_UNRESOLVED
+    -> perform effect
+    -> reobserve actual state
+    -> record progress
 ```
+
+`DISPATCH_UNRESOLVED` is written only after ownership has been established and
+immediately before crossing the external dispatch boundary. It means that the
+request may have reached the external service. A failure proven to occur before
+that boundary is not ambiguous and permits an unexternalized credential candidate
+to be abandoned and regenerated; after the boundary, its generation is sticky.
 
 Each credential-mutation intent names one exact consequential effect rather than a
 broad rotation phase. Runtime-action progress is keyed by the normalized configured
@@ -225,11 +237,14 @@ object-level concurrency and transaction recovery checks.
 ## External credential-system boundaries
 
 Slice 3A provides direct HTTP client boundaries without connecting them to the
-CLI, transaction state, Lease acquisition or workflow decisions. HTTP calls use
-bounded 5-second connect and 30-second request timeouts with configurable trusted
-CA input. Mutating requests have no automatic retry. A transport interruption
-during a mutation is reported as ambiguous so future orchestration must reobserve
-external state before deciding whether to act again.
+planning CLI or embedding workflow decisions in the adapters. Slice 3B connects
+the required clients to durable transaction state and Lease ownership for
+PREPARE_B, while Slice 3C consumes their read/authentication behavior for A-state
+reconciliation. HTTP calls use bounded 5-second connect and 30-second request
+timeouts with configurable trusted CA input. Mutating requests have no automatic
+retry. A transport interruption during a mutation is reported as ambiguous so
+workflow orchestration must reobserve external state before deciding whether to
+act again.
 
 For external mutations, a non-success or malformed response does not by itself
 prove that the server did not apply the change. Transport failures, 5xx responses,
@@ -252,8 +267,9 @@ fresh authentication is still required to observe whether an intended password w
 Rackspace Identity Internal v2 exchanges the configured AD service-account
 credential for a redacted token used as PasswordSafe `X-Auth-Token`. Normal
 PasswordSafe reads use JSON. Password updates PATCH only the password, and HTTP
-204 is merely acceptance of the request, not proof of durable completion. Future
-workflow must use a separate GET to verify the observed credential and version.
+204 is merely acceptance of the request, not proof of durable completion.
+Mutation workflows must use a separate GET to verify the observed credential and
+version; PREPARE_B does so for B staging.
 Historical PasswordSafe retrieval is not implemented. Exact old-A history remains
 a deferred exceptional recovery capability from the implementation brief; Slice 3C
 instead uses current PasswordSafe A and the successful stable-A verification.
@@ -355,10 +371,10 @@ username, user domain, project ID/name/domain, required role ID and unexpired
 token. Credential rejection and indeterminate transport/policy/malformed outcomes
 remain distinct. Both old and new authenticating, wrong identity or scope,
 unknown credential generations, reversed/partial authority topologies, malformed
-representations, breeder UID replacement and lack of any working admin candidate
-return typed invalid or indeterminate reconciliation results rather than being
-forced into A0-A3. An indeterminate old-A authentication prevents A2 even when
-A-new authentication succeeds.
+representations, breeder UID replacement (`BREEDER_IDENTITY_CHANGED`) and lack of
+any working admin candidate return typed invalid or indeterminate reconciliation
+results rather than being forced into A0-A3. An indeterminate old-A authentication
+prevents A2 even when A-new authentication succeeds.
 
 Mutation intent and `DISPATCH_UNRESOLVED` progress are deliberately ignored as
 authority: they may explain why recovery is occurring, but observed external
@@ -366,6 +382,33 @@ reality determines the credential state. Slice 3C performs no PasswordSafe,
 Keystone, breeder, transaction-progress, propagation or runtime write. Lockout
 state remains a separate typed transaction fact; this classifier neither reads a
 fresh lockout value nor uses lockout suppression to define A0-A3.
+
+## Runtime order and next implementation boundary
+
+The logical runtime transaction remains:
+
+```text
+STABLE_A -> PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A
+    -> SWITCH_TO_A -> VERIFY_A -> STABLE_A
+```
+
+Implementation slices need not be built in that execution order. Slice 3D is the
+next implementation increment and adds a bounded `ROTATE_A` library capability;
+this does not authorize an end-to-end runner to invoke it before the still-required
+`SWITCH_TO_B` and `VERIFY_B` runtime gates.
+
+Slice 3D will consume the Slice 3C classifier, require the appropriate A0 state,
+use freshly verified breakglass authorization to enable admin lockout suppression,
+and positively read back that suppression is active. It will then generate A-new,
+persist its intended generation and breeder-staging intent, conditionally stage it
+in the canonical breeder Secret, reobserve external reality to establish A1, and
+stop before changing the Keystone admin password.
+
+Slice 3E will later provide forward recovery: A1 resets Keystone admin to the exact
+staged A-new, A2 updates PasswordSafe admin to that exact value, and A3 means A
+credential rotation is complete. Consumer propagation, runtime actions, the
+return to A, final verification, lockout restoration, and deployment packaging
+remain separate later work.
 
 ## Security and deployment limits
 

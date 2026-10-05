@@ -4,7 +4,7 @@
 
 This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool.
 
-The project is no longer a read-only bootstrap.
+The project now includes mutation-capable library behavior.
 
 Implemented work currently includes:
 
@@ -65,8 +65,7 @@ The CLI remains primarily read-only/planning-oriented. PREPARE_B is available as
 a library workflow, and A-state reconciliation is available as a read-only library
 boundary; the end-to-end rotation command is not implemented.
 
-No production workflow currently performs SWITCH_TO_B, any A mutation, or any
-later phase.
+No implemented path performs SWITCH_TO_B, any A mutation, or any later phase.
 
 ## Read these first
 
@@ -101,6 +100,8 @@ workflow decision
 persist intent
     ->
 assert ownership
+    ->
+mark DISPATCH_UNRESOLVED
     ->
 perform effect
     ->
@@ -169,16 +170,31 @@ Do not choose one source arbitrarily and overwrite the others.
 For consequential external effects:
 
 ```text
-persist intent
+persist pre-dispatch intent
     ->
 assert current ownership
     ->
+record DISPATCH_UNRESOLVED
+    ->
 perform effect
     ->
-observe actual state
+reobserve actual state
     ->
 record progress
 ```
+
+Record `DISPATCH_UNRESOLVED` only after ownership is established and immediately
+before crossing the external dispatch boundary. It means the request may have
+reached the external service. A failure proven to occur before that boundary is
+not an ambiguous mutation; a credential candidate whose cleartext was never
+externalized may be abandoned and regenerated. After the boundary, its generation
+is sticky.
+
+Do not add separate same-value capability probes. The first real required
+PasswordSafe mutation plus verified read-back establishes PasswordSafe write
+capability. Slice 3D must establish lockout capability through the actual
+lockout-suppression mutation and must positively observe suppression before
+staging A-new.
 
 Do not infer non-application merely from an unexpected mutation response.
 
@@ -276,7 +292,9 @@ Accept: application/json
 
 Password mutation uses a password-only JSON PATCH.
 
-A successful HTTP 204 is acceptance of the mutation request, not proof that PasswordSafe now contains the intended value. Later workflow must GET and verify.
+A successful HTTP 204 is acceptance of the mutation request, not proof that
+PasswordSafe now contains the intended value. Workflow code must GET and verify;
+PREPARE_B does so after staging B.
 
 Historical PasswordSafe retrieval is intentionally **not implemented**. Slice 3C
 uses current PasswordSafe A plus the recorded stable-A generation and does not need
@@ -339,11 +357,16 @@ authorization. B2 requires a fresh, correctly-scoped breakglass token with the
 recorded admin role. PasswordSafe B staging is the first PasswordSafe mutation;
 PREPARE_B does not mutate PasswordSafe A or the admin lockout option.
 
-`dispatch_unresolved` distinguishes an intent that may have reached an external
-service from one persisted before dispatch. Recovery reobserves first. A matching
+`DISPATCH_UNRESOLVED` is recorded after an immediate ownership assertion and just
+before external dispatch. It distinguishes an intent that may have reached an
+external service from pre-dispatch intent. Recovery reobserves first. A matching
 PasswordSafe value or successful B authentication discovers an applied ambiguous
 write; an unresolved old value blocks without a second generation or blind retry.
-An expired-owner Lease takeover follows the same observation gates.
+A proven pre-dispatch failure may use a new candidate only when the earlier
+cleartext was never externalized. Once dispatch is unresolved, or PasswordSafe is
+observed to contain the intended generation, that generation is sticky and the
+exact PasswordSafe value must be recovered and reused. An expired-owner Lease
+takeover follows the same observation gates.
 
 On success, PREPARE_B records phase `SWITCH_TO_B` and stops. It does not execute
 that phase. Re-entry for the same already-advanced request returns existing
@@ -359,7 +382,7 @@ The transaction's intended A-new generation is the only accepted new generation,
 and the earlier successful `stable-a` verification identifies old A and anchors
 the breeder Secret UID. A current breeder with a different UID is invalid before
 topology evaluation or authentication, even when its credential bytes match an
-otherwise expected generation.
+otherwise expected generation; the typed reason is `BREEDER_IDENTITY_CHANGED`.
 
 Transaction mutation progress is not authoritative. For example, already-staged
 breeder reality can classify A1 despite pending progress, fresh A-new rejection
@@ -378,23 +401,34 @@ fact and is not part of the A0-A3 enum.
 
 ## Next implementation increment
 
-The next workflow increment begins with **SWITCH_TO_B**. It must remain separate
-from PREPARE_B and derive mutations/actions from fresh observations and the
-configured credential-location contract.
+The next coding task is **Slice 3D**, a bounded `ROTATE_A` library capability.
+Implementation order is distinct from runtime execution order: Slice 3D may be
+built before `SWITCH_TO_B` and `VERIFY_B`, but no end-to-end runner may invoke it
+without those required runtime gates.
 
-Later ROTATE_A mutation work must require the real admin lockout-suppression
-operation to be observed active before any A-new breeder staging or admin
-password reset. It must consume, not replace, the Slice 3C observed-state
-classifier.
+Slice 3D should:
 
-Keep out unless an explicit task authorizes the corresponding later slice:
+1. consume the existing Slice 3C classifier;
+2. require the appropriate A0 starting state;
+3. use freshly verified breakglass authorization to enable admin lockout suppression;
+4. read back and positively verify that suppression is active;
+5. generate A-new;
+6. persist the intended A-new generation and breeder-staging intent;
+7. conditionally stage A-new in the canonical breeder Secret;
+8. reobserve external reality and establish A1; and
+9. stop before changing the Keystone admin password.
+
+Slice 3E will later handle forward recovery: A1 resets Keystone admin to the
+exact staged A-new, A2 updates PasswordSafe admin to that exact value, and A3
+means A credential rotation is complete.
+
+Keep all of the following out of Slice 3D:
 
 ```text
 SWITCH_TO_B Secret propagation
 runtime workload actions
 VERIFY_B service/runtime probes
 
-breeder A-new staging
 Keystone admin password rotation
 PasswordSafe admin convergence
 
@@ -406,13 +440,9 @@ transaction completion cleanup
 Job/RBAC packaging
 ```
 
-The next slice should propagate the already-prepared breakglass credential
-to the configured switchable consumer locations while leaving A itself
-unchanged.
-
 ## Later rotation direction
 
-The intended high-level transaction remains:
+The logical runtime transaction remains:
 
 ```text
 STABLE_A
@@ -432,14 +462,22 @@ VERIFY_A
 STABLE_A
 ```
 
+That runtime order is unchanged by building the bounded Slice 3D library before
+the propagation and verification libraries. `SWITCH_TO_B` and `VERIFY_B` still
+must complete before `ROTATE_A` executes in any future runner.
+
 The current A rotation ordering remains:
 
 ```text
+authenticate verified breakglass authorization
+    ->
+enable and positively verify admin lockout suppression
+    ->
 stage A-new in breeder with provenance
     ->
 change Keystone admin to A-new using B
     ->
-freshly authenticate A-new
+freshly authenticate A-new and determinately reject old A
     ->
 PATCH PasswordSafe admin to A-new
     ->
@@ -450,27 +488,29 @@ Recognized A states remain:
 
 ```text
 A0
-    PasswordSafe old
-    breeder old
-    Keystone old
+    PasswordSafe and breeder contain established old A
+    old A freshly authenticates as the expected admin identity/scope/authorization
 
 A1
-    PasswordSafe old
-    breeder new with valid transaction provenance
-    Keystone old
+    PasswordSafe contains established old A
+    breeder contains intended A-new
+    old A succeeds as expected admin and A-new is determinately rejected
 
 A2
-    PasswordSafe old
-    breeder new with valid provenance
-    Keystone new
+    PasswordSafe contains established old A
+    breeder contains intended A-new
+    A-new succeeds as expected admin and old A is determinately rejected
 
 A3
-    PasswordSafe new
-    breeder new
-    Keystone new
+    PasswordSafe and breeder contain intended A-new
+    A-new freshly authenticates as the expected admin identity/scope/authorization
 ```
 
-These are observed credential states, not program counters.
+All four states require continuity with the breeder Secret UID recorded by the
+successful `stable-a` verification. A recreated breeder is invalid even when its
+credential matches an expected generation. These are observed credential states,
+not program counters; mutation progress never overrides external reality. In
+particular, A-new success plus old-A indeterminacy is not A2.
 
 Forward recovery is preferred over routine password rollback.
 
@@ -529,7 +569,9 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 A suitable next task is:
 
-> Implement the SWITCH_TO_B slice only, using the existing typed locations,
-> transaction state and ownership boundary. Reobserve external state, persist
-> exact intents before effects, apply structural consumer changes and required
-> runtime actions, and stop before VERIFY_B. Do not begin A rotation.
+> Implement Slice 3D only as a bounded `ROTATE_A` library capability. Consume the
+> Slice 3C classifier, require A0, enable and verify lockout suppression with
+> breakglass authorization, generate and durably identify A-new, conditionally
+> stage it in the canonical breeder, reobserve A1, and stop before the Keystone
+> admin password reset. Do not implement or bypass the `SWITCH_TO_B` and
+> `VERIFY_B` runtime gates, Slice 3E, propagation, runtime actions, or packaging.

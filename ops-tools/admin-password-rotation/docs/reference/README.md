@@ -12,10 +12,10 @@ keystone-admin-rotation-specification/
 
 ## Post-brief amendments
 
-- Exact historical old-A PasswordSafe retrieval remains an exceptional
-  recovery requirement, but its implementation is deliberately deferred
-  until the A-recovery slice establishes the concrete need. Slice 3A does
-  not expose `get_exact_history_version()`.
+- Exact historical old-A PasswordSafe retrieval remains an exceptional,
+  deferred recovery capability. Slice 3C demonstrates that A0-A3
+  reconciliation does not require it, and no current client exposes
+  `get_exact_history_version()`.
 
 - Separate same-value mutation capability probes are not required.
   Capability is established by the first real mutation that the workflow
