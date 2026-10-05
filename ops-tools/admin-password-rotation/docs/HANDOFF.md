@@ -51,13 +51,22 @@ Slice 3B
     observed B0/B1/B2 classification and recovery
     PasswordSafe B staging and exact-user Keystone B reset
     ambiguity reconciliation without blind mutation retry
+
+Slice 3C
+    read-only PasswordSafe A and breeder observation
+    intended-generation and stable-old generation matching
+    fresh expected-admin Keystone authentication
+    typed A0/A1/A2/A3 classification
+    typed invalid and indeterminate reconciliation outcomes
+    secret-free observation/result records
 ```
 
 The CLI remains primarily read-only/planning-oriented. PREPARE_B is available as
-a library workflow; the end-to-end rotation command is not implemented.
+a library workflow, and A-state reconciliation is available as a read-only library
+boundary; the end-to-end rotation command is not implemented.
 
-No production workflow currently performs SWITCH_TO_B, ROTATE_A, or any later
-phase.
+No production workflow currently performs SWITCH_TO_B, any A mutation, or any
+later phase.
 
 ## Read these first
 
@@ -269,7 +278,10 @@ Password mutation uses a password-only JSON PATCH.
 
 A successful HTTP 204 is acceptance of the mutation request, not proof that PasswordSafe now contains the intended value. Later workflow must GET and verify.
 
-Historical PasswordSafe retrieval is intentionally **not implemented yet**. Exact old-A historical retrieval remains a deferred exceptional recovery capability and should be added only if the later A-recovery implementation demonstrates the concrete need.
+Historical PasswordSafe retrieval is intentionally **not implemented**. Slice 3C
+uses current PasswordSafe A plus the recorded stable-A generation and does not need
+history. Exact old-A historical retrieval remains a deferred exceptional recovery
+capability that requires a future concrete need.
 
 ## Durable transaction and Lease behavior
 
@@ -337,15 +349,43 @@ On success, PREPARE_B records phase `SWITCH_TO_B` and stops. It does not execute
 that phase. Re-entry for the same already-advanced request returns existing
 progress without another B rotation.
 
+## Implemented read-only A-state boundary
+
+`a_state.py` observes current PasswordSafe A, breeder A and bounded fresh Keystone
+password-authentication results, then classifies A0/A1/A2/A3 or returns a typed
+invalid/indeterminate result. Exact credential bytes are reduced to generation
+identifiers; the observation and result types contain no cleartext credential.
+The transaction's intended A-new generation is the only accepted new generation,
+and the earlier successful `stable-a` verification identifies old A and anchors
+the breeder Secret UID. A current breeder with a different UID is invalid before
+topology evaluation or authentication, even when its credential bytes match an
+otherwise expected generation.
+
+Transaction mutation progress is not authoritative. For example, already-staged
+breeder reality can classify A1 despite pending progress, fresh A-new rejection
+overrides a recorded Keystone-reset success, and matching intended values plus
+fresh valid A-new authentication classify A3 despite unresolved PasswordSafe
+progress. Wrong identity/scope/authorization, unknown generations, both candidates
+authenticating, malformed authority data and indeterminate authentication all
+block with specific safe reason codes. A2 specifically requires correctly scoped
+A-new success plus a determinate old-A rejection; indeterminate old-A
+authentication blocks A2.
+
+This boundary does not suppress lockout, generate A-new, write the breeder, reset
+Keystone admin, update PasswordSafe A, write transaction progress, propagate a
+credential or run workload actions. Lockout remains a separate typed transaction
+fact and is not part of the A0-A3 enum.
+
 ## Next implementation increment
 
 The next workflow increment begins with **SWITCH_TO_B**. It must remain separate
 from PREPARE_B and derive mutations/actions from fresh observations and the
 configured credential-location contract.
 
-Later ROTATE_A work must require the real admin lockout-suppression
-operation to be observed active before any A-new breeder staging or
-admin password reset.
+Later ROTATE_A mutation work must require the real admin lockout-suppression
+operation to be observed active before any A-new breeder staging or admin
+password reset. It must consume, not replace, the Slice 3C observed-state
+classifier.
 
 Keep out unless an explicit task authorizes the corresponding later slice:
 
@@ -354,7 +394,6 @@ SWITCH_TO_B Secret propagation
 runtime workload actions
 VERIFY_B service/runtime probes
 
-A0/A1/A2/A3 recovery classification
 breeder A-new staging
 Keystone admin password rotation
 PasswordSafe admin convergence
@@ -459,8 +498,8 @@ If existing design or implementation behavior appears inconsistent with the curr
 From `ops-tools/admin-password-rotation`, run:
 
 ```bash
-python -m pyright
-python -m pytest -q
+./.venv/bin/python -m pyright
+./.venv/bin/python -m pytest -q
 ./scripts/check.sh
 git diff --check
 ```
