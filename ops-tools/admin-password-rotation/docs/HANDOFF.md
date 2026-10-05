@@ -418,7 +418,7 @@ Keystone admin, update PasswordSafe A, write transaction progress, propagate a
 credential or run workload actions. Lockout remains a separate typed transaction
 fact and is not part of the A0-A3 enum.
 
-## Current Slice 3D boundary
+## Implemented Slice 3D boundary
 
 Slice 3D is implemented as a bounded `ROTATE_A` library capability. Implementation
 order remains distinct from runtime execution order: no end-to-end runner may call
