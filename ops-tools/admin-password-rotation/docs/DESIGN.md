@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented.
+Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, and 3E are implemented.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -8,8 +8,10 @@ Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented.
   implemented as a library boundary.
 - Slice 3D implements admin lockout suppression and canonical A-new breeder
   staging, stopping only after fresh observation establishes A1.
-- SWITCH_TO_B, VERIFY_B, Keystone admin password mutation, PasswordSafe A
-  convergence, and all later orchestration remain unimplemented.
+- Slice 3E implements forward-only core A convergence from A1/A2/A3, stopping
+  only after fresh observation establishes A3.
+- SWITCH_TO_B, VERIFY_B, consumer propagation, SWITCH_TO_A, VERIFY_A, lockout
+  restoration, and all later orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -35,7 +37,7 @@ Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented.
 | `prepare_b.py` | Stable-A reconciliation and observed-state PREPARE_B/B0-B2 orchestration. |
 | `a_state.py` | Read-only authoritative A-credential observation and A0-A3 reconciliation. |
 | `breeder.py` | Direct canonical-breeder reads and UID/resourceVersion-conditional password/provenance patches. |
-| `rotate_a.py` | Bounded Slice 3D lockout suppression and A0-to-A1 breeder-staging orchestration. |
+| `rotate_a.py` | Bounded Slice 3D A0-to-A1 staging and Slice 3E A1-to-A3 core-credential convergence. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -277,7 +279,8 @@ credential for a redacted token used as PasswordSafe `X-Auth-Token`. Normal
 PasswordSafe reads use JSON. Password updates PATCH only the password, and HTTP
 204 is merely acceptance of the request, not proof of durable completion.
 Mutation workflows must use a separate GET to verify the observed credential and
-version; PREPARE_B does so for B staging.
+version; PREPARE_B does so for B staging and Slice 3E does so for the admin A
+update.
 Historical PasswordSafe retrieval is not implemented. Exact old-A history remains
 a deferred exceptional recovery capability from the implementation brief; Slice 3C
 instead uses current PasswordSafe A and the successful stable-A verification.
@@ -400,10 +403,11 @@ STABLE_A -> PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A
     -> SWITCH_TO_A -> VERIFY_A -> STABLE_A
 ```
 
-Implementation slices need not be built in that execution order. Slice 3D is now
-implemented as the bounded `run_rotate_a_stage_breeder` library capability; this
-does not authorize an end-to-end runner to invoke it before the still-required
-`SWITCH_TO_B` and `VERIFY_B` runtime gates.
+Implementation slices need not be built in that execution order. Slice 3D is the
+bounded `run_rotate_a_stage_breeder` capability and Slice 3E is the bounded
+`run_rotate_a_converge` capability. Their existence does not authorize an
+end-to-end runner to invoke `ROTATE_A` before the still-required `SWITCH_TO_B` and
+`VERIFY_B` runtime gates.
 
 Slice 3D consumes the Slice 3C classifier and begins new staging only from freshly
 observed A0. It freshly retrieves and authenticates the authoritative breakglass
@@ -431,11 +435,28 @@ invocation may generate a replacement candidate if the prior cleartext was lost.
 timeouts, 429s and 5xx responses where the patch may actually have applied; those
 generations stay sticky.
 
-Slice 3E will later provide forward recovery: A1 resets Keystone admin to the exact
-staged A-new, A2 updates PasswordSafe admin to that exact value, and A3 means A
-credential rotation is complete. Consumer propagation, runtime actions, the
-return to A, final verification, lockout restoration, and deployment packaging
-remain separate later work.
+Slice 3E consumes only fresh Slice 3C reality. It revalidates the stable breeder
+UID, transaction provenance, and intended generation and recovers the exact
+cleartext A-new from the breeder; it never generates A-newer. It also freshly
+validates breakglass authorization and requires the admin lockout option to remain
+suppressed with durable restoration required.
+
+From A1 it persists `RESET_A_KEYSTONE` intent, asserts ownership, records
+`DISPATCH_UNRESOLVED`, resets the recorded admin user ID to exact staged A-new,
+and requires fresh A2. From fresh A2 it similarly persists
+`UPDATE_A_PASSWORDSAFE`, asserts ownership, records unresolved dispatch, PATCHes
+only the admin password, reads the exact record back, and requires fresh A3.
+Ambiguous mutations are resolved only by observation; old/unsettled reality stays
+unresolved without blind replay, while definite rejection returns to pre-dispatch
+retryable progress. Starting at A2 skips the Keystone write and starting at A3
+performs no A credential mutation.
+
+Successful Slice 3E means only that the core A credential is converged across the
+breeder, Keystone, and PasswordSafe at fresh A3. The transaction remains in
+`ROTATE_A`; lockout remains suppressed and restoration remains required. Consumer
+propagation, runtime actions, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration,
+final transaction completion, and deployment packaging remain separate later
+work.
 
 ## Security and deployment limits
 

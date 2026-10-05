@@ -5,8 +5,9 @@ password-rotation tool. The CLI remains focused on topology inspection and
 planning. The library now includes durable transaction state, conditional
 Kubernetes persistence, cooperative Lease ownership, typed external mutation
 clients, the PREPARE_B workflow, and read-only A0-A3 reconciliation. There is no
-complete end-to-end rotation command yet. Slice 3D additionally provides bounded
-library orchestration for admin lockout suppression and canonical breeder staging.
+complete end-to-end rotation command yet. Slices 3D and 3E additionally provide
+bounded library orchestration for admin lockout suppression, canonical breeder
+staging, and forward convergence of the core A credential through observed A3.
 
 ```
 contract YAML -> validated immutable types -> Secret inventory
@@ -14,7 +15,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, and 3E are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -22,10 +23,15 @@ mutation. Slice 3D uses that observation to start only from A0, validates fresh
 breakglass authority, suppresses admin lockout, and conditionally stages A-new in
 the canonical breeder with transaction provenance. It succeeds only after fresh
 observation establishes A1, leaving lockout suppressed and restoration required.
+Slice 3E recovers the exact staged A-new from the breeder, resets the recorded
+Keystone admin user from A1, requires fresh A2, updates and reads back the exact
+PasswordSafe admin record, and requires fresh A3. It does not generate or stage a
+credential, and it leaves lockout suppressed with restoration still required.
 
-These library workflows are not exposed as an end-to-end CLI runner. Keystone
-admin password mutation, PasswordSafe admin convergence, consumer propagation,
-runtime actions, return propagation, and final verification remain unimplemented.
+These library workflows are not exposed as an end-to-end CLI runner. Runtime
+`SWITCH_TO_B` / `VERIFY_B` remain required before `ROTATE_A` and are not bypassed.
+Consumer propagation, runtime actions, `SWITCH_TO_A`, `VERIFY_A`, lockout
+restoration, and final transaction completion remain unimplemented.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
 clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl

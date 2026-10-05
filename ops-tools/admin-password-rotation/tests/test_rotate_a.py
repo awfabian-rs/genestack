@@ -11,7 +11,7 @@ import pytest
 from admin_password_rotation.breeder import (
     BreederErrorCode, BreederProvenance, FakeBreederSecretClient,
 )
-from admin_password_rotation.external_http import ExternalErrorCode
+from admin_password_rotation.external_http import ExternalClientError, ExternalErrorCode
 from admin_password_rotation.keystone import (
     FakeKeystoneClient, KeystoneAuthenticationResult, KeystoneAuthIndeterminate,
     KeystoneAuthSuccess, KeystoneIndeterminateReason, KeystonePasswordAuthRequest,
@@ -30,6 +30,8 @@ from admin_password_rotation.passwordsafe import (
     FakePasswordSafeClient, IdentityAccess, PasswordSafeCredential,
 )
 from admin_password_rotation.rotate_a import (
+    RotateAConvergeError, RotateAConvergeErrorCode, RotateAConvergeInputs,
+    RotateAConvergeOutcome, run_rotate_a_converge,
     RotateAStageError, RotateAStageErrorCode, RotateAStageInputs,
     RotateAStageOutcome, run_rotate_a_stage_breeder,
 )
@@ -82,6 +84,48 @@ class MemoryStateStore(StateStore):
             raise RuntimeError("injected process termination")
         return self.current
 
+
+class CrashOnStateWrite(MemoryStateStore):
+    def __init__(
+        self, state: PersistentState, *, step: CredentialMutationStep | None = None,
+        effect: IntentEffectState | None = None,
+        verification: str | None = None, before: bool = False,
+    ) -> None:
+        super().__init__(state)
+        self.step = step
+        self.effect = effect
+        self.verification = verification
+        self.before = before
+        self.crashed = False
+
+    def update(
+        self, expected: StateRevision, new_state: PersistentState,
+    ) -> PersistedState:
+        transaction = new_state.current_transaction
+        intent = None if transaction is None else transaction.credential_mutation_intent
+        matches_intent = (
+            self.step is not None
+            and intent is not None
+            and intent.step is self.step
+            and intent.effect_state is self.effect
+        )
+        matches_verification = (
+            self.verification is not None
+            and transaction is not None
+            and any(
+                item.check_id == self.verification
+                for item in transaction.verifications
+            )
+        )
+        should_crash = not self.crashed and (matches_intent or matches_verification)
+        if should_crash and self.before:
+            self.crashed = True
+            raise RuntimeError("injected process termination")
+        result = super().update(expected, new_state)
+        if should_crash:
+            self.crashed = True
+            raise RuntimeError("injected process termination")
+        return result
 
 class Ownership:
     requires_recovery_gate = False
@@ -158,6 +202,38 @@ class CrashAfterLockoutApply(FakeKeystoneClient):
     ) -> None:
         super().set_ignore_lockout_failure_attempts(
             user_id=user_id, value=value, management_token=management_token,
+        )
+        if not self.crashed:
+            self.crashed = True
+            raise RuntimeError("injected process termination")
+
+
+class CrashAfterAdminReset(FakeKeystoneClient):
+    crashed = False
+
+    def set_user_password(
+        self, *, user_id: str, new_password: SecretValue,
+        management_token: SecretValue,
+    ) -> None:
+        super().set_user_password(
+            user_id=user_id, new_password=new_password,
+            management_token=management_token,
+        )
+        if not self.crashed:
+            self.crashed = True
+            raise RuntimeError("injected process termination")
+
+
+class CrashAfterPasswordSafeUpdate(FakePasswordSafeClient):
+    crashed = False
+
+    def update_password(
+        self, *, access: IdentityAccess, project_id: int, credential_id: int,
+        new_password: SecretValue,
+    ) -> None:
+        super().update_password(
+            access=access, project_id=project_id,
+            credential_id=credential_id, new_password=new_password,
         )
         if not self.crashed:
             self.crashed = True
@@ -298,6 +374,72 @@ def assert_error(
 ) -> None:
     with pytest.raises(RotateAStageError) as raised:
         run(store, ps, ks, breeder, owner, generated=generated)
+    assert raised.value.kind is expected
+
+
+def converge_inputs() -> RotateAConvergeInputs:
+    return RotateAConvergeInputs(ENVIRONMENT, contract(), access(), 10)
+
+
+def converge_transaction(
+    *, step: CredentialMutationStep = CredentialMutationStep.STAGE_A_BREEDER,
+    effect: IntentEffectState = IntentEffectState.OBSERVED,
+    suppressed: bool = True, restore_required: bool = True,
+) -> RotationTransaction:
+    generation = CredentialGeneration.from_secret(A_NEW_1)
+    value = transaction(
+        intended=generation, effect=effect, suppressed=suppressed,
+        restore_required=restore_required,
+    )
+    assert value.credential_mutation_intent is not None
+    return replace(
+        value,
+        credential_mutation_intent=replace(
+            value.credential_mutation_intent,
+            step=step,
+            target=(
+                value.credential_mutation_intent.target
+                if step is CredentialMutationStep.STAGE_A_BREEDER else None
+            ),
+            resulting_resource_version=(
+                value.credential_mutation_intent.resulting_resource_version
+                if step is CredentialMutationStep.STAGE_A_BREEDER else None
+            ),
+        ),
+    )
+
+
+def staged_breeder(
+    password: SecretValue = A_NEW_1, *, uid: str = "fixture-keystone-admin",
+    annotations: tuple[SecretAnnotation, ...] | None = None,
+) -> FakeBreederSecretClient:
+    generation = CredentialGeneration.from_secret(A_NEW_1)
+    snapshot = breeder_snapshot(
+        password, resource_version="124",
+        annotations=(staged_annotations(generation) if annotations is None else annotations),
+    )
+    return FakeBreederSecretClient(replace(snapshot, uid=uid))
+
+
+def converge(
+    store: MemoryStateStore, ps: FakePasswordSafeClient,
+    ks: FakeKeystoneClient, breeder: FakeBreederSecretClient,
+    owner: Ownership | None = None,
+):
+    return run_rotate_a_converge(
+        converge_inputs(), state_store=store,
+        ownership=owner or Ownership(store), passwordsafe=ps,
+        keystone=ks, breeder=breeder, clock=lambda: NOW,
+    )
+
+
+def assert_converge_error(
+    expected: RotateAConvergeErrorCode, store: MemoryStateStore,
+    ps: FakePasswordSafeClient, ks: FakeKeystoneClient,
+    breeder: FakeBreederSecretClient, owner: Ownership | None = None,
+) -> None:
+    with pytest.raises(RotateAConvergeError) as raised:
+        converge(store, ps, ks, breeder, owner)
     assert raised.value.kind is expected
 
 
@@ -874,3 +1016,645 @@ def test_result_state_and_errors_do_not_render_credentials_or_tokens() -> None:
     )
     for value in (A_OLD, A_NEW_1, B, access().token):
         assert value.reveal().decode() not in rendered
+
+
+def test_converge_a1_resets_exact_admin_then_updates_passwordsafe_after_a2() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    breeder = staged_breeder()
+    owner = Ownership(store)
+    original = breeder.snapshot
+
+    result = converge(store, ps, ks, breeder, owner)
+
+    assert result.outcome is RotateAConvergeOutcome.A3_ESTABLISHED
+    assert result.starting_state.value == "A1"
+    assert result.observed_state.value == "A3"
+    assert ks.password_update_calls == ["admin-user"]
+    assert ps.update_calls == [(10, 101)]
+    assert breeder.snapshot == original
+    assert breeder.stage_calls == 0
+    assert ps.get_current(
+        access=access(), project_id=10, credential_id=101,
+    ).password == A_NEW_1
+    current = result.persisted.state.current_transaction
+    assert current is not None
+    assert current.new_a_sha256 == CredentialGeneration.from_secret(A_NEW_1)
+    assert current.lockout.latest_ignore_lockout_failure_attempts is True
+    assert current.lockout.restore_required
+    assert current.phase is RotationPhase.ROTATE_A
+    assert owner.observed == [
+        (LockoutChangeState.EFFECT_OBSERVED, IntentEffectState.UNKNOWN),
+        (LockoutChangeState.EFFECT_OBSERVED, IntentEffectState.UNKNOWN),
+    ]
+    a2_write = next(
+        index for index, persisted in enumerate(store.history)
+        if persisted.current_transaction is not None
+        and any(
+            item.check_id == "slice-3e-a2"
+            for item in persisted.current_transaction.verifications
+        )
+    )
+    update_dispatch = next(
+        index for index, persisted in enumerate(store.history)
+        if persisted.current_transaction is not None
+        and persisted.current_transaction.credential_mutation_intent is not None
+        and persisted.current_transaction.credential_mutation_intent.step
+        is CredentialMutationStep.UPDATE_A_PASSWORDSAFE
+        and persisted.current_transaction.credential_mutation_intent.effect_state
+        is IntentEffectState.DISPATCH_UNRESOLVED
+    )
+    assert a2_write < update_dispatch
+
+
+def test_converge_reset_ownership_failure_is_predispatch_and_resumable() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    breeder = staged_breeder()
+    owner = Ownership(store, fail_on=1)
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.OWNERSHIP_LOST,
+        store, ps, ks, breeder, owner,
+    )
+
+    blocked = store.current.state.current_transaction
+    assert blocked is not None
+    assert blocked.credential_mutation_intent is not None
+    assert blocked.credential_mutation_intent.step is CredentialMutationStep.RESET_A_KEYSTONE
+    assert blocked.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
+    assert blocked.new_a_sha256 == CredentialGeneration.from_secret(A_NEW_1)
+    assert ks.password_update_calls == []
+
+    result = converge(store, ps, ks, breeder)
+    assert result.observed_state.value == "A3"
+    assert ks.password_update_calls == ["admin-user"]
+
+
+@pytest.mark.parametrize("apply", [True, False])
+def test_converge_ambiguous_keystone_reset_is_resolved_by_observation(
+    apply: bool,
+) -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    ks.ambiguous_next_password_update_apply = apply
+
+    if apply:
+        result = converge(store, ps, ks, staged_breeder())
+        assert result.observed_state.value == "A3"
+        assert ps.update_calls == [(10, 101)]
+    else:
+        assert_converge_error(
+            RotateAConvergeErrorCode.RESET_A_UNRESOLVED,
+            store, ps, ks, staged_breeder(),
+        )
+        current = store.current.state.current_transaction
+        assert current is not None
+        assert current.credential_mutation_intent is not None
+        assert current.credential_mutation_intent.effect_state is IntentEffectState.DISPATCH_UNRESOLVED
+        assert ps.update_calls == []
+        assert_converge_error(
+            RotateAConvergeErrorCode.RESET_A_UNRESOLVED,
+            store, ps, ks, staged_breeder(),
+        )
+        assert ks.password_update_calls == ["admin-user"]
+
+
+class BothAcceptedKeystone(FakeKeystoneClient):
+    def authenticate_password(
+        self, request: KeystonePasswordAuthRequest,
+    ) -> KeystoneAuthenticationResult:
+        result = super().authenticate_password(request)
+        if (
+            request.username == "admin"
+            and request.password == A_OLD
+            and self.password_update_calls
+        ):
+            return super().authenticate_password(replace(request, password=A_NEW_1))
+        return result
+
+
+class IndeterminateAfterResetKeystone(FakeKeystoneClient):
+    def authenticate_password(
+        self, request: KeystonePasswordAuthRequest,
+    ) -> KeystoneAuthenticationResult:
+        if request.username == "admin" and self.password_update_calls:
+            return KeystoneAuthIndeterminate(
+                KeystoneIndeterminateReason.DEPENDENCY_FAILURE,
+            )
+        return super().authenticate_password(request)
+
+
+@pytest.mark.parametrize(
+    ("client_type", "expected"),
+    [
+        (BothAcceptedKeystone, RotateAConvergeErrorCode.RESET_A_STATE_INVALID),
+        (
+            IndeterminateAfterResetKeystone,
+            RotateAConvergeErrorCode.RESET_A_STATE_INDETERMINATE,
+        ),
+    ],
+)
+def test_converge_ambiguous_reset_blocks_invalid_or_indeterminate_auth(
+    client_type: type[FakeKeystoneClient], expected: RotateAConvergeErrorCode,
+) -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ks = add_users(client_type(
+        project_id="admin-project", project_name="admin",
+        project_domain_id="default-domain",
+    ), suppressed=True)
+    ks.ambiguous_next_password_update_apply = True
+
+    assert_converge_error(expected, store, passwordsafe(), ks, staged_breeder())
+    assert ks.password_update_calls == ["admin-user"]
+
+
+def test_converge_starting_a2_skips_keystone_and_verifies_passwordsafe_readback() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+
+    result = converge(store, ps, ks, staged_breeder())
+
+    assert result.starting_state.value == "A2"
+    assert result.observed_state.value == "A3"
+    assert ks.password_update_calls == []
+    assert ps.update_calls == [(10, 101)]
+    # Initial A2 observation, explicit post-PATCH readback, final A3
+    # observation, and final lockout validation all use fresh external reads.
+    assert ps.get_calls.count((10, 101)) >= 3
+    current = result.persisted.state.current_transaction
+    assert current is not None
+    assert current.passwordsafe.observed_a_record_id == 101
+    assert current.passwordsafe.observed_a_version == 8
+
+
+@pytest.mark.parametrize("apply", [True, False])
+def test_converge_ambiguous_passwordsafe_update_is_resolved_by_readback(
+    apply: bool,
+) -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ps.ambiguous_next_update_apply = apply
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+
+    if apply:
+        result = converge(store, ps, ks, staged_breeder())
+        assert result.observed_state.value == "A3"
+    else:
+        assert_converge_error(
+            RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_UNRESOLVED,
+            store, ps, ks, staged_breeder(),
+        )
+        current = store.current.state.current_transaction
+        assert current is not None
+        assert current.credential_mutation_intent is not None
+        assert current.credential_mutation_intent.effect_state is IntentEffectState.DISPATCH_UNRESOLVED
+        assert current.new_a_sha256 == CredentialGeneration.from_secret(A_NEW_1)
+        assert_converge_error(
+            RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_UNRESOLVED,
+            store, ps, ks, staged_breeder(),
+        )
+        assert ps.update_calls == [(10, 101)]
+
+
+def test_converge_ambiguous_passwordsafe_unrelated_value_fails_closed() -> None:
+    class Client(FakePasswordSafeClient):
+        def update_password(
+            self, *, access: IdentityAccess, project_id: int,
+            credential_id: int, new_password: SecretValue,
+        ) -> None:
+            del access, new_password
+            self.update_calls.append((project_id, credential_id))
+            self.add(PasswordSafeCredential(
+                project_id, credential_id, "admin", 8,
+                SecretValue(b"Unrelated_0123456789abcdefghijkl"),
+            ))
+            raise ExternalClientError(ExternalErrorCode.MUTATION_AMBIGUOUS)
+
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = Client()
+    ps.add(PasswordSafeCredential(10, 101, "admin", 7, A_OLD))
+    ps.add(PasswordSafeCredential(10, 202, "breakglass", 4, B))
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.PASSWORDSAFE_UNRELATED_CREDENTIAL,
+        store, ps, ks, staged_breeder(),
+    )
+    assert ps.update_calls == [(10, 101)]
+
+
+@pytest.mark.parametrize("target", ["keystone", "passwordsafe"])
+def test_converge_definite_rejection_is_not_left_ambiguous(target: str) -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(
+        admin=A_NEW_1 if target == "passwordsafe" else A_OLD,
+        suppressed=True,
+    )
+    if target == "keystone":
+        ks.next_mutation_error = ExternalErrorCode.AUTHORIZATION_FAILURE
+        expected = RotateAConvergeErrorCode.RESET_A_REJECTED
+    else:
+        ps.next_update_error = ExternalErrorCode.AUTHORIZATION_FAILURE
+        expected = RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_REJECTED
+
+    assert_converge_error(expected, store, ps, ks, staged_breeder())
+
+    current = store.current.state.current_transaction
+    assert current is not None
+    assert current.credential_mutation_intent is not None
+    assert current.credential_mutation_intent.effect_state is IntentEffectState.UNKNOWN
+    if target == "passwordsafe":
+        assert ps.get_calls.count((10, 101)) >= 2
+
+
+def test_converge_starting_a3_is_noop_and_preserves_lockout_restore_requirement() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe(admin=A_NEW_1)
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+    breeder = staged_breeder()
+
+    result = converge(store, ps, ks, breeder)
+
+    assert result.outcome is RotateAConvergeOutcome.A3_ALREADY_ESTABLISHED
+    assert result.starting_state.value == "A3"
+    assert ks.password_update_calls == []
+    assert ps.update_calls == []
+    current = result.persisted.state.current_transaction
+    assert current is not None
+    assert current.lockout.suppression is LockoutChangeState.EFFECT_OBSERVED
+    assert current.lockout.latest_ignore_lockout_failure_attempts is True
+    assert current.lockout.restore_required
+    assert current.lockout.restoration is LockoutChangeState.NOT_INTENDED
+    assert current.phase is RotationPhase.ROTATE_A
+    assert current.status is TransactionStatus.ACTIVE
+
+
+def test_converge_a1_requires_fresh_exact_breakglass_before_reset() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ks = AlteredBreakglassKeystone("project")
+    add_users(ks, suppressed=True)
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.BREAKGLASS_IDENTITY_MISMATCH,
+        store, passwordsafe(), ks, staged_breeder(),
+    )
+
+    assert ks.password_update_calls == []
+    assert ks.lockout_update_calls == []
+
+
+def test_converge_a0_and_indeterminate_start_are_not_mutated() -> None:
+    a0_store = MemoryStateStore(state(converge_transaction()))
+    a0_ps = passwordsafe()
+    a0_ks = keystone(suppressed=True)
+    assert_converge_error(
+        RotateAConvergeErrorCode.ILLEGAL_A0_START,
+        a0_store, a0_ps, a0_ks,
+        FakeBreederSecretClient(breeder_snapshot()),
+    )
+    assert a0_ks.password_update_calls == []
+    assert a0_ps.update_calls == []
+
+    indeterminate_store = MemoryStateStore(state(converge_transaction()))
+    indeterminate_ps = passwordsafe()
+    indeterminate_ks = keystone(suppressed=True)
+    indeterminate_ks.next_auth_indeterminate = (
+        KeystoneIndeterminateReason.DEPENDENCY_FAILURE
+    )
+    assert_converge_error(
+        RotateAConvergeErrorCode.START_INDETERMINATE,
+        indeterminate_store, indeterminate_ps, indeterminate_ks,
+        staged_breeder(),
+    )
+    assert indeterminate_ks.password_update_calls == []
+    assert indeterminate_ps.update_calls == []
+
+
+@pytest.mark.parametrize(
+    ("suppressed", "restore_required", "suppression_state", "expected"),
+    [
+        (
+            False, True, LockoutChangeState.EFFECT_OBSERVED,
+            RotateAConvergeErrorCode.LOCKOUT_SUPPRESSION_REQUIRED,
+        ),
+        (
+            True, False, LockoutChangeState.EFFECT_OBSERVED,
+            RotateAConvergeErrorCode.LOCKOUT_STATE_INCONSISTENT,
+        ),
+        (
+            True, True, LockoutChangeState.INTENT_PERSISTED,
+            RotateAConvergeErrorCode.LOCKOUT_STATE_INCONSISTENT,
+        ),
+    ],
+)
+def test_converge_inconsistent_lockout_prerequisite_blocks_all_a_mutation(
+    suppressed: bool, restore_required: bool,
+    suppression_state: LockoutChangeState,
+    expected: RotateAConvergeErrorCode,
+) -> None:
+    tx = converge_transaction(
+        suppressed=suppressed, restore_required=restore_required,
+    )
+    tx = replace(tx, lockout=replace(tx.lockout, suppression=suppression_state))
+    store = MemoryStateStore(state(tx))
+    ps = passwordsafe()
+    ks = keystone(suppressed=suppressed)
+
+    assert_converge_error(expected, store, ps, ks, staged_breeder())
+
+    assert ks.password_update_calls == []
+    assert ps.update_calls == []
+    assert ks.lockout_update_calls == []
+
+
+def test_converge_indeterminate_lockout_observation_blocks_all_a_mutation() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    ks.next_get_user_error = ExternalErrorCode.DEPENDENCY_FAILURE
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.LOCKOUT_OBSERVATION_FAILED,
+        store, ps, ks, staged_breeder(),
+    )
+
+    assert ks.password_update_calls == []
+    assert ps.update_calls == []
+
+
+def test_converge_a2_with_suppression_false_blocks_passwordsafe_mutation() -> None:
+    tx = converge_transaction(suppressed=False, restore_required=True)
+    store = MemoryStateStore(state(tx))
+    ps = passwordsafe()
+    ks = keystone(admin=A_NEW_1, suppressed=False)
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.LOCKOUT_SUPPRESSION_REQUIRED,
+        store, ps, ks, staged_breeder(),
+    )
+
+    assert ks.password_update_calls == []
+    assert ps.update_calls == []
+
+
+@pytest.mark.parametrize("mismatch", ["uid", "old", "unrelated", "provenance"])
+def test_converge_revalidates_breeder_authority_before_mutation(mismatch: str) -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    if mismatch == "uid":
+        breeder = staged_breeder(uid="replacement-uid")
+        expected = RotateAConvergeErrorCode.BREEDER_IDENTITY_CHANGED
+    elif mismatch == "old":
+        breeder = staged_breeder(A_OLD)
+        expected = RotateAConvergeErrorCode.ILLEGAL_A0_START
+    elif mismatch == "unrelated":
+        breeder = staged_breeder(
+            SecretValue(b"Unrelated_0123456789abcdefghijkl"),
+        )
+        expected = RotateAConvergeErrorCode.BREEDER_VALUE_MISMATCH
+    else:
+        wrong = BreederProvenance(
+            UUID("99999999-9999-4999-8999-999999999999"),
+            CredentialGeneration.from_secret(A_NEW_1),
+        ).annotations()
+        breeder = staged_breeder(annotations=wrong)
+        expected = RotateAConvergeErrorCode.BREEDER_PROVENANCE_MISMATCH
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+
+    assert_converge_error(expected, store, ps, ks, breeder)
+
+    assert ks.password_update_calls == []
+    assert ps.update_calls == []
+
+
+def test_converge_a2_revalidates_breeder_provenance_before_passwordsafe_mutation() -> None:
+    wrong = BreederProvenance(
+        UUID("99999999-9999-4999-8999-999999999999"),
+        CredentialGeneration.from_secret(A_NEW_1),
+    ).annotations()
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.BREEDER_PROVENANCE_MISMATCH,
+        store, ps, ks, staged_breeder(annotations=wrong),
+    )
+
+    assert ps.update_calls == []
+
+
+def test_converge_recorded_reset_success_cannot_override_fresh_a1() -> None:
+    store = MemoryStateStore(state(converge_transaction(
+        step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.OBSERVED,
+    )))
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.PROGRESS_CONTRADICTS_REALITY,
+        store, ps, ks, staged_breeder(),
+    )
+
+    assert ks.password_update_calls == []
+    assert ps.update_calls == []
+
+
+@pytest.mark.parametrize("observed", ["A1", "A2", "A3"])
+def test_converge_generation_is_immutable_and_breeder_is_never_staged(
+    observed: str,
+) -> None:
+    intended = CredentialGeneration.from_secret(A_NEW_1)
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe(admin=A_NEW_1 if observed == "A3" else A_OLD)
+    ks = keystone(
+        admin=A_OLD if observed == "A1" else A_NEW_1,
+        suppressed=True,
+    )
+    breeder = staged_breeder()
+
+    result = converge(store, ps, ks, breeder)
+
+    current = result.persisted.state.current_transaction
+    assert current is not None
+    assert current.new_a_sha256 == intended
+    assert breeder.stage_calls == 0
+    assert breeder.snapshot.get("password") == A_NEW_1
+
+
+def test_converge_result_and_errors_do_not_render_secrets() -> None:
+    result = converge(
+        MemoryStateStore(state(converge_transaction())),
+        passwordsafe(), keystone(suppressed=True), staged_breeder(),
+    )
+    rendered = repr(result) + json.dumps(
+        asdict(result),
+        default=lambda value: value.value if isinstance(value, Enum) else str(value),
+        sort_keys=True,
+    )
+    error = RotateAConvergeError(RotateAConvergeErrorCode.RESET_A_UNRESOLVED)
+    rendered += repr(error) + str(error)
+    for value in (A_OLD, A_NEW_1, B, access().token):
+        assert value.reveal().decode() not in rendered
+
+
+def test_converge_resumes_after_reset_intent_persistence() -> None:
+    store = CrashOnStateWrite(
+        state(converge_transaction()), step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.UNKNOWN,
+    )
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+    assert ks.password_update_calls == []
+
+    result = converge(store, ps, ks, breeder)
+    assert result.observed_state.value == "A3"
+    assert ks.password_update_calls == ["admin-user"]
+
+
+def test_converge_dispatch_marker_without_keystone_effect_is_not_blindly_retried() -> None:
+    store = CrashOnStateWrite(
+        state(converge_transaction()), step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.DISPATCH_UNRESOLVED,
+    )
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+    assert ks.password_update_calls == []
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.RESET_A_UNRESOLVED,
+        store, ps, ks, breeder,
+    )
+    assert ks.password_update_calls == []
+
+
+def test_converge_resumes_after_keystone_reset_applied_before_observation() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = passwordsafe()
+    ks = add_users(CrashAfterAdminReset(
+        project_id="admin-project", project_name="admin",
+        project_domain_id="default-domain",
+    ), suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+
+    result = converge(store, ps, ks, breeder)
+    assert result.starting_state.value == "A2"
+    assert result.observed_state.value == "A3"
+    assert ks.password_update_calls == ["admin-user"]
+
+
+def test_converge_resumes_after_a2_observation_before_progress_write() -> None:
+    store = CrashOnStateWrite(
+        state(converge_transaction()), step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.OBSERVED, before=True,
+    )
+    ps = passwordsafe()
+    ks = keystone(suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+    current = store.current.state.current_transaction
+    assert current is not None
+    assert current.credential_mutation_intent is not None
+    assert current.credential_mutation_intent.effect_state is IntentEffectState.DISPATCH_UNRESOLVED
+
+    result = converge(store, ps, ks, breeder)
+    assert result.starting_state.value == "A2"
+    assert result.observed_state.value == "A3"
+    assert ks.password_update_calls == ["admin-user"]
+
+
+def test_converge_resumes_after_passwordsafe_intent_persistence() -> None:
+    store = CrashOnStateWrite(
+        state(converge_transaction()),
+        step=CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+        effect=IntentEffectState.UNKNOWN,
+    )
+    ps = passwordsafe()
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+    assert ps.update_calls == []
+
+    result = converge(store, ps, ks, breeder)
+    assert result.observed_state.value == "A3"
+    assert ps.update_calls == [(10, 101)]
+
+
+def test_converge_dispatch_marker_without_passwordsafe_effect_is_not_retried() -> None:
+    store = CrashOnStateWrite(
+        state(converge_transaction()),
+        step=CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+        effect=IntentEffectState.DISPATCH_UNRESOLVED,
+    )
+    ps = passwordsafe()
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+    assert ps.update_calls == []
+
+    assert_converge_error(
+        RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_UNRESOLVED,
+        store, ps, ks, breeder,
+    )
+    assert ps.update_calls == []
+
+
+def test_converge_resumes_after_passwordsafe_apply_before_get_verification() -> None:
+    store = MemoryStateStore(state(converge_transaction()))
+    ps = CrashAfterPasswordSafeUpdate()
+    ps.add(PasswordSafeCredential(10, 101, "admin", 7, A_OLD))
+    ps.add(PasswordSafeCredential(10, 202, "breakglass", 4, B))
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+
+    result = converge(store, ps, ks, breeder)
+    assert result.starting_state.value == "A3"
+    assert result.observed_state.value == "A3"
+    assert ps.update_calls == [(10, 101)]
+
+
+def test_converge_resumes_after_a3_observation_before_completion_write() -> None:
+    store = CrashOnStateWrite(
+        state(converge_transaction()), verification="slice-3e-a3", before=True,
+    )
+    ps = passwordsafe()
+    ks = keystone(admin=A_NEW_1, suppressed=True)
+    breeder = staged_breeder()
+
+    with pytest.raises(RuntimeError, match="process termination"):
+        converge(store, ps, ks, breeder)
+
+    result = converge(store, ps, ks, breeder)
+    assert result.starting_state.value == "A3"
+    assert result.observed_state.value == "A3"
+    assert ps.update_calls == [(10, 101)]
+    current = result.persisted.state.current_transaction
+    assert current is not None
+    assert any(item.check_id == "slice-3e-a3" for item in current.verifications)

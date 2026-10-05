@@ -68,15 +68,28 @@ Slice 3D
     secure A-new generation with pre-/post-dispatch recovery semantics
     conditional canonical breeder staging with transaction provenance
     fresh observed A1 completion while lockout remains suppressed
+
+Slice 3E
+    exact staged A-new recovery from the canonical breeder
+    fresh breakglass and lockout-prerequisite validation
+    exact-user Keystone admin reset with ambiguity reconciliation
+    fresh observed A2 gate before PasswordSafe mutation
+    password-only PasswordSafe admin update and read-after-write verification
+    fresh observed A3 completion with forward-only interruption recovery
+    immutable A-new generation and no breeder staging
 ```
 
-The CLI remains primarily read-only/planning-oriented. PREPARE_B and Slice 3D are
-available as bounded library workflows, and A-state reconciliation is available as
-a read-only library boundary; the end-to-end rotation command is not implemented.
+The CLI remains primarily read-only/planning-oriented. PREPARE_B and Slices 3D/3E
+are available as bounded library workflows, and A-state reconciliation is
+available as a read-only library boundary; the end-to-end rotation command is not
+implemented.
 
-No implemented path performs SWITCH_TO_B, VERIFY_B, the Keystone admin password
-reset, the PasswordSafe A update, or any later phase. Slice 3D changes only the
-admin lockout option and canonical breeder Secret, then stops at observed A1.
+No implemented runner performs SWITCH_TO_B or VERIFY_B or bypasses those required
+runtime gates. Slice 3D changes only the admin lockout option and canonical breeder
+Secret, then stops at observed A1. Slice 3E is a separate bounded library
+capability that converges the core A credential to observed A3. No implemented
+path performs consumer propagation, SWITCH_TO_A, VERIFY_A, lockout restoration,
+or final transaction completion.
 
 ## Read these first
 
@@ -431,19 +444,31 @@ generates and durably identifies A-new, conditionally stages only the canonical
 breeder password plus transaction provenance, and succeeds only after fresh A1
 classification. It leaves lockout suppressed and restoration required.
 
-Slice 3E will later handle forward recovery: A1 resets Keystone admin to the
-exact staged A-new, A2 updates PasswordSafe admin to that exact value, and A3
-means A credential rotation is complete.
+## Implemented Slice 3E boundary
 
-Keep all of the following out of Slice 3D:
+Slice 3E is implemented as bounded `run_rotate_a_converge` recovery. It accepts
+only fresh A1/A2/A3 reality from Slice 3C, revalidates breeder UID, exact intended
+generation, and transaction provenance, and uses the breeder as the sole cleartext
+A-new source. It never generates or stages a replacement credential.
+
+A1 freshly validates exact breakglass authorization and the lockout invariant,
+then performs `RESET_A_KEYSTONE` in intent, ownership, unresolved-dispatch,
+exact-user mutation, and fresh-observation order. Fresh A2 is mandatory before
+`UPDATE_A_PASSWORDSAFE`, which follows the same ordering and adds exact-record GET
+verification before fresh A3. Ambiguous dispatches advance only when observed
+reality proves the intended effect. Definite non-application remains distinct,
+and unresolved old reality is not blindly retried.
+
+Starting at A2 skips the Keystone reset. Starting at A3 performs neither A
+mutation. Success records fresh A3 but does not complete the transaction: phase
+remains `ROTATE_A`, lockout remains suppressed, and restoration remains required.
+
+Keep all of the following out of Slices 3D/3E:
 
 ```text
 SWITCH_TO_B Secret propagation
 runtime workload actions
 VERIFY_B service/runtime probes
-
-Keystone admin password rotation
-PasswordSafe admin convergence
 
 SWITCH_TO_A
 VERIFY_A
@@ -475,9 +500,9 @@ VERIFY_A
 STABLE_A
 ```
 
-That runtime order is unchanged by building the bounded Slice 3D library before
-the propagation and verification libraries. `SWITCH_TO_B` and `VERIFY_B` still
-must complete before `ROTATE_A` executes in any future runner.
+That runtime order is unchanged by building the bounded Slice 3D/3E libraries
+before the propagation and verification libraries. `SWITCH_TO_B` and `VERIFY_B`
+still must complete before `ROTATE_A` executes in any future runner.
 
 The current A rotation ordering remains:
 
@@ -580,10 +605,7 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 ## Suggested next-agent task
 
-A suitable next task is:
-
-> Implement Slice 3E forward recovery only: consume observed A1/A2/A3 reality,
-> reset Keystone admin to the exact already-staged A-new for A1, update the
-> authoritative PasswordSafe A record for A2, and establish A3. Do not implement
-> or bypass `SWITCH_TO_B` / `VERIFY_B`, consumer propagation, `SWITCH_TO_A`,
-> `VERIFY_A`, lockout restoration, final completion, runtime actions, or packaging.
+Select the next bounded slice from current checked-in guidance. Do not wire a
+runner that bypasses `SWITCH_TO_B` / `VERIFY_B`, and do not treat Slice 3E's A3 as
+transaction completion. Consumer propagation, `SWITCH_TO_A`, `VERIFY_A`, lockout
+restoration, final completion, runtime actions, and packaging remain unimplemented.
