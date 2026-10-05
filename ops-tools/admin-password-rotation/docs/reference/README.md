@@ -30,3 +30,8 @@ keystone-admin-rotation-specification/
   positively observed as active before breeder staging or admin password
   mutation is permitted. A separate `false -> false` lockout capability
   probe is not required.
+
+- Definite atomic conditional rejection is not mutation ambiguity. When the API
+  authoritatively proves non-application, recovery may return to a
+  pre-dispatch/retryable state. `DISPATCH_UNRESOLVED` is reserved for outcomes
+  where the effect may have reached the external service.

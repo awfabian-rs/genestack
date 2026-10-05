@@ -54,7 +54,8 @@ Preserve these unless an explicit design update says otherwise:
 - Durable transaction state records intent and recovery context, not authoritative reality.
 - Observed external state takes precedence over progress flags.
 - For each consequential mutation, persist pre-dispatch intent, assert current ownership, record `DISPATCH_UNRESOLVED` immediately before crossing the external dispatch boundary, perform the effect, reobserve actual state, and only then record progress.
-- A proven pre-dispatch failure is not an ambiguous external mutation. A generated credential may be abandoned and regenerated only if its cleartext was never externalized; after the dispatch boundary its generation is sticky.
+- A proven pre-dispatch failure is not an ambiguous external mutation. A generated credential may be abandoned and regenerated only if its cleartext was never externalized; after an unresolved dispatch where application cannot be ruled out, its generation is sticky.
+- Definite rejection and ambiguous dispatch are distinct recovery classes. When an API authoritatively proves an atomic conditional mutation did not apply, return to a pre-dispatch/retryable state rather than retaining `DISPATCH_UNRESOLVED`; when application cannot be ruled out, keep unresolved-dispatch state and the intended generation sticky while reobserving reality.
 - PasswordSafe mutation capability is established by its first real required mutation and verified postcondition, not by a separate same-value probe.
 - Before any later A credential mutation, the real admin lockout-suppression operation must be positively observed active.
 - Unknown or contradictory credential state fails closed.
@@ -211,6 +212,12 @@ Review the final diff for:
    workflow is about to issue the external request. It means dispatch may have
    reached the external service. A failure proven to occur before that boundary
    is not ambiguous and does not by itself make a credential generation sticky.
+4. An authoritative atomic conditional rejection proves non-application even
+   though the dispatch boundary was crossed. After fresh reobservation, recovery
+   may return to a pre-dispatch/retryable state and replace a lost in-memory
+   candidate. Unresolved-dispatch semantics remain reserved for outcomes where
+   the effect may have applied; those generations remain sticky. Do not infer
+   non-application from status codes or responses that lack this guarantee.
 
 ## Final report
 
