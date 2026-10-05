@@ -1,4 +1,4 @@
-"""Bounded Slice 3D orchestration: suppress lockout and stage A-new breeder."""
+"""Bounded ROTATE_A capabilities for staging and converging A-new."""
 from __future__ import annotations
 
 import hmac
@@ -15,7 +15,7 @@ from .breeder import (
     BreederError, BreederErrorCode, BreederProvenance, BreederReference,
     BreederSecretClient,
 )
-from .errors import SafeError
+from .errors import RepresentationError, SafeError
 from .external_http import ExternalClientError, ExternalErrorCode
 from .keystone import (
     KeystoneAuthIndeterminate, KeystoneAuthRejected, KeystoneAuthSuccess,
@@ -31,6 +31,7 @@ from .model import (
 from .passwords import generate_admin_password
 from .passwordsafe import IdentityAccess, PasswordSafeClient, PasswordSafeCredential
 from .prepare_b import OwnershipGuard
+from .representations import read_credential
 from .state_store import PersistedState, StateStore
 
 
@@ -109,6 +110,71 @@ class RotateAStageInputs:
 @dataclass(frozen=True)
 class RotateAStageResult:
     outcome: RotateAStageOutcome
+    observed_state: ARotationObservedState
+    persisted: PersistedState
+
+
+class RotateAConvergeErrorCode(Enum):
+    ENVIRONMENT_MISMATCH = "rotate_a_converge_environment_mismatch"
+    NO_TRANSACTION = "rotate_a_converge_no_transaction"
+    UNSUPPORTED_PHASE = "rotate_a_converge_unsupported_phase"
+    ILLEGAL_A0_START = "rotate_a_converge_illegal_a0_start"
+    START_INVALID = "rotate_a_converge_start_invalid"
+    START_INDETERMINATE = "rotate_a_converge_start_indeterminate"
+    PASSWORDSAFE_ACCESS_EXPIRED = "rotate_a_converge_passwordsafe_access_expired"
+    BREAKGLASS_RECORD_INVALID = "rotate_a_converge_breakglass_record_invalid"
+    BREAKGLASS_UNAVAILABLE = "rotate_a_converge_breakglass_unavailable"
+    BREAKGLASS_REJECTED = "rotate_a_converge_breakglass_rejected"
+    BREAKGLASS_AUTH_INDETERMINATE = "rotate_a_converge_breakglass_auth_indeterminate"
+    BREAKGLASS_IDENTITY_MISMATCH = "rotate_a_converge_breakglass_identity_mismatch"
+    ADMIN_USER_MISMATCH = "rotate_a_converge_admin_user_mismatch"
+    LOCKOUT_OBSERVATION_FAILED = "rotate_a_converge_lockout_observation_failed"
+    LOCKOUT_SUPPRESSION_REQUIRED = "rotate_a_converge_lockout_suppression_required"
+    LOCKOUT_STATE_INCONSISTENT = "rotate_a_converge_lockout_state_inconsistent"
+    BREEDER_READ_FAILED = "rotate_a_converge_breeder_read_failed"
+    BREEDER_IDENTITY_CHANGED = "rotate_a_converge_breeder_identity_changed"
+    BREEDER_VALUE_MISMATCH = "rotate_a_converge_breeder_value_mismatch"
+    BREEDER_PROVENANCE_MISMATCH = "rotate_a_converge_breeder_provenance_mismatch"
+    OWNERSHIP_LOST = "rotate_a_converge_ownership_lost"
+    PROGRESS_CONTRADICTS_REALITY = "rotate_a_converge_progress_contradicts_reality"
+    RESET_A_REJECTED = "rotate_a_converge_reset_a_rejected"
+    RESET_A_UNRESOLVED = "rotate_a_converge_reset_a_unresolved"
+    RESET_A_STATE_INVALID = "rotate_a_converge_reset_a_state_invalid"
+    RESET_A_STATE_INDETERMINATE = "rotate_a_converge_reset_a_state_indeterminate"
+    PASSWORDSAFE_RECORD_INVALID = "rotate_a_converge_passwordsafe_record_invalid"
+    PASSWORDSAFE_UPDATE_REJECTED = "rotate_a_converge_passwordsafe_update_rejected"
+    PASSWORDSAFE_UPDATE_UNRESOLVED = "rotate_a_converge_passwordsafe_update_unresolved"
+    PASSWORDSAFE_UNRELATED_CREDENTIAL = "rotate_a_converge_passwordsafe_unrelated_credential"
+    FINAL_STATE_INVALID = "rotate_a_converge_final_state_invalid"
+    FINAL_STATE_INDETERMINATE = "rotate_a_converge_final_state_indeterminate"
+
+
+_CONVERGE_ERROR_MESSAGES = {
+    kind: "Slice 3E cannot continue safely; inspect the recorded error category."
+    for kind in RotateAConvergeErrorCode
+}
+
+
+class RotateAConvergeError(SafeError):
+    def __init__(self, kind: RotateAConvergeErrorCode) -> None:
+        self.kind = kind
+        super().__init__(kind.value, _CONVERGE_ERROR_MESSAGES[kind])
+
+
+class RotateAConvergeOutcome(Enum):
+    A3_ESTABLISHED = "a3_established"
+    A3_ALREADY_ESTABLISHED = "a3_already_established"
+
+
+@dataclass(frozen=True)
+class RotateAConvergeInputs(RotateAStageInputs):
+    """Slice 3E inputs; identical authority configuration to Slice 3D."""
+
+
+@dataclass(frozen=True)
+class RotateAConvergeResult:
+    outcome: RotateAConvergeOutcome
+    starting_state: ARotationObservedState
     observed_state: ARotationObservedState
     persisted: PersistedState
 
@@ -709,4 +775,554 @@ def run_rotate_a_stage_breeder(
     except RotateAStageError as error:
         if session.persisted.state.current_transaction is not None:
             session.block(error, now)
+        raise
+
+
+def _converge_error_from_stage(error: RotateAStageError) -> RotateAConvergeError:
+    mapping = {
+        RotateAStageErrorCode.PASSWORDSAFE_ACCESS_EXPIRED:
+            RotateAConvergeErrorCode.PASSWORDSAFE_ACCESS_EXPIRED,
+        RotateAStageErrorCode.BREAKGLASS_RECORD_INVALID:
+            RotateAConvergeErrorCode.BREAKGLASS_RECORD_INVALID,
+        RotateAStageErrorCode.BREAKGLASS_UNAVAILABLE:
+            RotateAConvergeErrorCode.BREAKGLASS_UNAVAILABLE,
+        RotateAStageErrorCode.BREAKGLASS_REJECTED:
+            RotateAConvergeErrorCode.BREAKGLASS_REJECTED,
+        RotateAStageErrorCode.BREAKGLASS_AUTH_INDETERMINATE:
+            RotateAConvergeErrorCode.BREAKGLASS_AUTH_INDETERMINATE,
+        RotateAStageErrorCode.BREAKGLASS_IDENTITY_MISMATCH:
+            RotateAConvergeErrorCode.BREAKGLASS_IDENTITY_MISMATCH,
+        RotateAStageErrorCode.ADMIN_USER_MISMATCH:
+            RotateAConvergeErrorCode.ADMIN_USER_MISMATCH,
+        RotateAStageErrorCode.LOCKOUT_OBSERVATION_FAILED:
+            RotateAConvergeErrorCode.LOCKOUT_OBSERVATION_FAILED,
+    }
+    return RotateAConvergeError(
+        mapping.get(error.kind, RotateAConvergeErrorCode.START_INVALID),
+    )
+
+
+def _observe_a_converge(
+    session: _Session, inputs: RotateAConvergeInputs, *,
+    breeder: BreederSecretClient, passwordsafe: PasswordSafeClient,
+    keystone: KeystoneClient, clock: Clock,
+) -> AReconciliationResult:
+    try:
+        return _observe_a(
+            session, inputs, breeder=breeder, passwordsafe=passwordsafe,
+            keystone=keystone, clock=clock,
+        )
+    except RotateAStageError as error:
+        if error.kind is RotateAStageErrorCode.START_INDETERMINATE:
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.START_INDETERMINATE,
+            ) from None
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INVALID) from None
+
+
+def _require_converge_state(
+    result: AReconciliationResult,
+) -> ARotationObservedState:
+    if result.status is AReconciliationStatus.INVALID:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INVALID)
+    if result.status is AReconciliationStatus.INDETERMINATE:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INDETERMINATE)
+    assert result.state is not None
+    return result.state
+
+
+def _stable_a_verification(transaction: RotationTransaction) -> VerificationResult:
+    matches = tuple(
+        item for item in transaction.verifications
+        if item.check_id == "stable-a"
+        and item.phase is RotationPhase.PREPARE_B
+        and item.status is VerificationStatus.SUCCESS
+    )
+    if len(matches) != 1:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INVALID)
+    stable = matches[0]
+    if stable.target_uid is None or stable.credential_generation is None:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INVALID)
+    return stable
+
+
+def _recover_staged_a(
+    session: _Session, inputs: RotateAConvergeInputs, *,
+    breeder: BreederSecretClient,
+) -> SecretValue:
+    intended = session.transaction.new_a_sha256
+    if intended is None:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.BREEDER_VALUE_MISMATCH)
+    try:
+        snapshot = breeder.read(inputs.breeder_reference)
+    except BreederError as error:
+        code = (
+            RotateAConvergeErrorCode.BREEDER_READ_FAILED
+            if error.kind is BreederErrorCode.READ_FAILED
+            else RotateAConvergeErrorCode.BREEDER_VALUE_MISMATCH
+        )
+        raise RotateAConvergeError(code) from None
+    stable = _stable_a_verification(session.transaction)
+    if snapshot.uid != stable.target_uid:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.BREEDER_IDENTITY_CHANGED,
+        )
+    try:
+        password = read_credential(
+            snapshot, inputs.contract.source.representation,
+        ).password
+        generation = CredentialGeneration.from_secret(password)
+    except (RepresentationError, ValueError):
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.BREEDER_VALUE_MISMATCH,
+        ) from None
+    if generation != intended:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.BREEDER_VALUE_MISMATCH,
+        )
+    if not BreederProvenance(
+        session.transaction.transaction_id, intended,
+    ).matches(snapshot):
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.BREEDER_PROVENANCE_MISMATCH,
+        )
+    return password
+
+
+def _require_converge_lockout(
+    session: _Session, inputs: RotateAConvergeInputs, *,
+    passwordsafe: PasswordSafeClient, keystone: KeystoneClient, now: datetime,
+) -> KeystoneAuthSuccess:
+    try:
+        _, authorization = _validate_breakglass(
+            session, inputs, passwordsafe=passwordsafe, keystone=keystone, now=now,
+        )
+        observed = _admin_user(
+            session, inputs, keystone=keystone, token=authorization.token,
+        )
+    except RotateAStageError as error:
+        raise _converge_error_from_stage(error) from None
+    if not observed.ignore_lockout_failure_attempts:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.LOCKOUT_SUPPRESSION_REQUIRED,
+        )
+    lockout = session.transaction.lockout
+    if not (
+        lockout.restore_required
+        and lockout.suppression is LockoutChangeState.EFFECT_OBSERVED
+        and lockout.latest_ignore_lockout_failure_attempts is True
+        and lockout.restoration is LockoutChangeState.NOT_INTENDED
+    ):
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.LOCKOUT_STATE_INCONSISTENT,
+        )
+    return authorization
+
+
+def _assert_converge_owned(ownership: OwnershipGuard) -> None:
+    try:
+        ownership.assert_owned()
+    except SafeError:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.OWNERSHIP_LOST,
+        ) from None
+
+
+def _write_converge_intent(
+    session: _Session, *, step: CredentialMutationStep,
+    effect: IntentEffectState, now: datetime,
+    passwordsafe_observation: tuple[int, int] | None = None,
+) -> None:
+    generation = session.transaction.new_a_sha256
+    if generation is None:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INVALID)
+    observed_at = now if effect is IntentEffectState.OBSERVED else None
+    transaction = replace(
+        session.transaction,
+        credential_mutation_intent=CredentialMutationIntent(
+            step, None, (), generation, effect, observed_at, None,
+        ),
+        status=TransactionStatus.ACTIVE,
+        last_error=None,
+        updated_at=now,
+    )
+    if passwordsafe_observation is not None:
+        record_id, version = passwordsafe_observation
+        transaction = replace(
+            transaction,
+            passwordsafe=replace(
+                transaction.passwordsafe,
+                observed_a_record_id=record_id,
+                observed_a_version=version,
+            ),
+        )
+    session.write(transaction)
+
+
+def _record_converged_state(
+    session: _Session, state: ARotationObservedState, *, now: datetime,
+) -> None:
+    generation = session.transaction.new_a_sha256
+    stable = _stable_a_verification(session.transaction)
+    if generation is None:
+        raise RotateAConvergeError(RotateAConvergeErrorCode.START_INVALID)
+    check_id = f"slice-3e-{state.value.lower()}"
+    item = VerificationResult(
+        check_id, RotationPhase.ROTATE_A, VerificationStatus.SUCCESS, now,
+        f"freshly-observed-{state.value.lower()}", stable.target_uid, generation,
+    )
+    retained = tuple(
+        value for value in session.transaction.verifications
+        if not (
+            value.check_id == check_id
+            and value.phase is RotationPhase.ROTATE_A
+        )
+    )
+    session.write(replace(
+        session.transaction,
+        verifications=(*retained, item),
+        status=TransactionStatus.ACTIVE,
+        last_error=None,
+        updated_at=now,
+    ))
+
+
+def _reconcile_converge_progress(
+    session: _Session, state: ARotationObservedState, *,
+    observation: AReconciliationResult, now: datetime,
+) -> None:
+    current = session.transaction.credential_mutation_intent
+    if current is None:
+        return
+    if state is ARotationObservedState.A1:
+        if (
+            current.step is CredentialMutationStep.UPDATE_A_PASSWORDSAFE
+            or (
+                current.step is CredentialMutationStep.RESET_A_KEYSTONE
+                and current.effect_state is IntentEffectState.OBSERVED
+            )
+        ):
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.PROGRESS_CONTRADICTS_REALITY,
+            )
+        return
+    if state is ARotationObservedState.A2:
+        if (
+            current.step is CredentialMutationStep.UPDATE_A_PASSWORDSAFE
+            and current.effect_state is IntentEffectState.OBSERVED
+        ):
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.PROGRESS_CONTRADICTS_REALITY,
+            )
+        if current.step is CredentialMutationStep.RESET_A_KEYSTONE:
+            _write_converge_intent(
+                session, step=current.step,
+                effect=IntentEffectState.OBSERVED, now=now,
+            )
+        return
+    if state is ARotationObservedState.A3 and current.step in (
+        CredentialMutationStep.RESET_A_KEYSTONE,
+        CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+    ):
+        passwordsafe_observation = None
+        if current.step is CredentialMutationStep.UPDATE_A_PASSWORDSAFE:
+            details = observation.observation
+            assert details is not None
+            passwordsafe_observation = (
+                details.passwordsafe_record_id,
+                details.passwordsafe_version,
+            )
+        _write_converge_intent(
+            session, step=current.step, effect=IntentEffectState.OBSERVED,
+            now=now, passwordsafe_observation=passwordsafe_observation,
+        )
+
+
+def _reset_admin_to_staged_a(
+    session: _Session, inputs: RotateAConvergeInputs, *,
+    ownership: OwnershipGuard, passwordsafe: PasswordSafeClient,
+    keystone: KeystoneClient, breeder: BreederSecretClient,
+    management_token: SecretValue, clock: Clock, now: datetime,
+) -> AReconciliationResult:
+    current = session.transaction.credential_mutation_intent
+    if (
+        current is not None
+        and current.step is CredentialMutationStep.RESET_A_KEYSTONE
+        and current.effect_state is IntentEffectState.DISPATCH_UNRESOLVED
+    ):
+        raise RotateAConvergeError(RotateAConvergeErrorCode.RESET_A_UNRESOLVED)
+    staged = _recover_staged_a(session, inputs, breeder=breeder)
+    _write_converge_intent(
+        session, step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.UNKNOWN, now=now,
+    )
+    _assert_converge_owned(ownership)
+    _write_converge_intent(
+        session, step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.DISPATCH_UNRESOLVED, now=now,
+    )
+    definite_rejection = False
+    try:
+        keystone.set_user_password(
+            user_id=session.transaction.keystone.admin_user_id,
+            new_password=staged,
+            management_token=management_token,
+        )
+    except ExternalClientError as error:
+        if error.kind is ExternalErrorCode.MUTATION_AMBIGUOUS:
+            pass
+        else:
+            definite_rejection = True
+            _write_converge_intent(
+                session, step=CredentialMutationStep.RESET_A_KEYSTONE,
+                effect=IntentEffectState.UNKNOWN, now=now,
+            )
+    observed = _observe_a_converge(
+        session, inputs, breeder=breeder, passwordsafe=passwordsafe,
+        keystone=keystone, clock=clock,
+    )
+    if observed.status is AReconciliationStatus.INDETERMINATE:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.RESET_A_STATE_INDETERMINATE,
+        )
+    if observed.status is AReconciliationStatus.INVALID or observed.state is None:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.RESET_A_STATE_INVALID,
+        )
+    if observed.state is ARotationObservedState.A1:
+        code = (
+            RotateAConvergeErrorCode.RESET_A_REJECTED
+            if definite_rejection
+            else RotateAConvergeErrorCode.RESET_A_UNRESOLVED
+        )
+        raise RotateAConvergeError(code)
+    if observed.state is ARotationObservedState.A0:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.RESET_A_STATE_INVALID,
+        )
+    _write_converge_intent(
+        session, step=CredentialMutationStep.RESET_A_KEYSTONE,
+        effect=IntentEffectState.OBSERVED, now=now,
+    )
+    if observed.state is ARotationObservedState.A2:
+        _record_converged_state(session, ARotationObservedState.A2, now=now)
+    return observed
+
+
+def _read_passwordsafe_admin(
+    session: _Session, inputs: RotateAConvergeInputs, *,
+    passwordsafe: PasswordSafeClient,
+) -> PasswordSafeCredential:
+    try:
+        record = passwordsafe.get_current(
+            access=inputs.passwordsafe_access,
+            project_id=inputs.passwordsafe_project_id,
+            credential_id=session.transaction.passwordsafe.configured_a_record_id,
+            expected_username=inputs.admin_username,
+        )
+    except ExternalClientError:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.PASSWORDSAFE_RECORD_INVALID,
+        ) from None
+    if (
+        record.project_id != inputs.passwordsafe_project_id
+        or record.credential_id
+        != session.transaction.passwordsafe.configured_a_record_id
+        or record.username != inputs.admin_username
+        or isinstance(record.version, bool)
+        or record.version <= 0
+    ):
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.PASSWORDSAFE_RECORD_INVALID,
+        )
+    return record
+
+
+def _update_passwordsafe_admin(
+    session: _Session, inputs: RotateAConvergeInputs, *,
+    ownership: OwnershipGuard, passwordsafe: PasswordSafeClient,
+    keystone: KeystoneClient, breeder: BreederSecretClient,
+    clock: Clock, now: datetime,
+) -> AReconciliationResult:
+    current = session.transaction.credential_mutation_intent
+    if (
+        current is not None
+        and current.step is CredentialMutationStep.UPDATE_A_PASSWORDSAFE
+        and current.effect_state is IntentEffectState.DISPATCH_UNRESOLVED
+    ):
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_UNRESOLVED,
+        )
+    staged = _recover_staged_a(session, inputs, breeder=breeder)
+    intended = session.transaction.new_a_sha256
+    assert intended is not None
+    old_generation = _stable_a_verification(
+        session.transaction,
+    ).credential_generation
+    assert old_generation is not None
+    _write_converge_intent(
+        session, step=CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+        effect=IntentEffectState.UNKNOWN, now=now,
+    )
+    _assert_converge_owned(ownership)
+    _write_converge_intent(
+        session, step=CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+        effect=IntentEffectState.DISPATCH_UNRESOLVED, now=now,
+    )
+    definite_rejection = False
+    try:
+        passwordsafe.update_password(
+            access=inputs.passwordsafe_access,
+            project_id=inputs.passwordsafe_project_id,
+            credential_id=session.transaction.passwordsafe.configured_a_record_id,
+            new_password=staged,
+        )
+    except ExternalClientError as error:
+        if error.kind is ExternalErrorCode.MUTATION_AMBIGUOUS:
+            pass
+        else:
+            definite_rejection = True
+            _write_converge_intent(
+                session, step=CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+                effect=IntentEffectState.UNKNOWN, now=now,
+            )
+    try:
+        record = _read_passwordsafe_admin(
+            session, inputs, passwordsafe=passwordsafe,
+        )
+    except RotateAConvergeError:
+        if definite_rejection:
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_REJECTED,
+            ) from None
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_UNRESOLVED,
+        ) from None
+    try:
+        actual_generation = CredentialGeneration.from_secret(record.password)
+    except ValueError:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.PASSWORDSAFE_RECORD_INVALID,
+        ) from None
+    if actual_generation == intended and _same(record.password, staged):
+        _write_converge_intent(
+            session, step=CredentialMutationStep.UPDATE_A_PASSWORDSAFE,
+            effect=IntentEffectState.OBSERVED, now=now,
+            passwordsafe_observation=(record.credential_id, record.version),
+        )
+    elif actual_generation == old_generation:
+        code = (
+            RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_REJECTED
+            if definite_rejection
+            else RotateAConvergeErrorCode.PASSWORDSAFE_UPDATE_UNRESOLVED
+        )
+        raise RotateAConvergeError(code)
+    else:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.PASSWORDSAFE_UNRELATED_CREDENTIAL,
+        )
+    observed = _observe_a_converge(
+        session, inputs, breeder=breeder, passwordsafe=passwordsafe,
+        keystone=keystone, clock=clock,
+    )
+    if observed.status is AReconciliationStatus.INDETERMINATE:
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.FINAL_STATE_INDETERMINATE,
+        )
+    if (
+        observed.status is AReconciliationStatus.INVALID
+        or observed.state is not ARotationObservedState.A3
+    ):
+        raise RotateAConvergeError(
+            RotateAConvergeErrorCode.FINAL_STATE_INVALID,
+        )
+    return observed
+
+
+def run_rotate_a_converge(
+    inputs: RotateAConvergeInputs, *, state_store: StateStore,
+    ownership: OwnershipGuard, passwordsafe: PasswordSafeClient,
+    keystone: KeystoneClient, breeder: BreederSecretClient,
+    clock: Clock = _utc_now,
+) -> RotateAConvergeResult:
+    """Run/resume only Slice 3E; successful execution stops at observed A3."""
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Slice 3E clock must return a timezone-aware value.")
+    now = now.astimezone(timezone.utc)
+    session = _Session(state_store, state_store.load())
+    try:
+        if session.persisted.state.environment != inputs.environment:
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.ENVIRONMENT_MISMATCH,
+            )
+        if session.persisted.state.current_transaction is None:
+            raise RotateAConvergeError(RotateAConvergeErrorCode.NO_TRANSACTION)
+        if session.transaction.phase is not RotationPhase.ROTATE_A:
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.UNSUPPORTED_PHASE,
+            )
+        starting_result = _observe_a_converge(
+            session, inputs, breeder=breeder, passwordsafe=passwordsafe,
+            keystone=keystone, clock=clock,
+        )
+        if starting_result.state is ARotationObservedState.A0:
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.ILLEGAL_A0_START,
+            )
+        _recover_staged_a(session, inputs, breeder=breeder)
+        starting_state = _require_converge_state(starting_result)
+        authorization = _require_converge_lockout(
+            session, inputs, passwordsafe=passwordsafe, keystone=keystone,
+            now=now,
+        )
+        _reconcile_converge_progress(
+            session, starting_state, observation=starting_result, now=now,
+        )
+        current_result = starting_result
+        current_state = starting_state
+        if current_state is ARotationObservedState.A1:
+            current_result = _reset_admin_to_staged_a(
+                session, inputs, ownership=ownership, passwordsafe=passwordsafe,
+                keystone=keystone, breeder=breeder,
+                management_token=authorization.token, clock=clock, now=now,
+            )
+            assert current_result.state is not None
+            current_state = current_result.state
+        if current_state is ARotationObservedState.A2:
+            if starting_state is ARotationObservedState.A2:
+                _record_converged_state(
+                    session, ARotationObservedState.A2, now=now,
+                )
+            current_result = _update_passwordsafe_admin(
+                session, inputs, ownership=ownership, passwordsafe=passwordsafe,
+                keystone=keystone, breeder=breeder, clock=clock, now=now,
+            )
+            assert current_result.state is ARotationObservedState.A3
+            current_state = ARotationObservedState.A3
+        if current_state is not ARotationObservedState.A3:
+            raise RotateAConvergeError(
+                RotateAConvergeErrorCode.FINAL_STATE_INVALID,
+            )
+        _require_converge_lockout(
+            session, inputs, passwordsafe=passwordsafe, keystone=keystone,
+            now=now,
+        )
+        _record_converged_state(session, ARotationObservedState.A3, now=now)
+        return RotateAConvergeResult(
+            RotateAConvergeOutcome.A3_ALREADY_ESTABLISHED
+            if starting_state is ARotationObservedState.A3
+            else RotateAConvergeOutcome.A3_ESTABLISHED,
+            starting_state,
+            ARotationObservedState.A3,
+            session.persisted,
+        )
+    except RotateAConvergeError as error:
+        if session.persisted.state.current_transaction is not None:
+            session.write(replace(
+                session.transaction,
+                status=TransactionStatus.BLOCKED,
+                last_error=SafeErrorInfo(error.kind.value, now),
+                updated_at=now,
+            ))
         raise

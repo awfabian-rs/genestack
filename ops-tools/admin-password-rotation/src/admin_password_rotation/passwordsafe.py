@@ -228,6 +228,7 @@ class FakePasswordSafeClient:
         self._records: dict[tuple[int, int], PasswordSafeCredential] = {}
         self.next_update_error: ExternalErrorCode | None = None
         self.ambiguous_next_update_apply: bool | None = None
+        self.get_calls: list[tuple[int, int]] = []
         self.update_calls: list[tuple[int, int]] = []
 
     def add(self, credential: PasswordSafeCredential) -> None:
@@ -239,6 +240,7 @@ class FakePasswordSafeClient:
         expected_username: str | None = None,
     ) -> PasswordSafeCredential:
         del access
+        self.get_calls.append((project_id, credential_id))
         key = (project_id, credential_id)
         if key not in self._records:
             raise ExternalClientError(ExternalErrorCode.NOT_FOUND)
