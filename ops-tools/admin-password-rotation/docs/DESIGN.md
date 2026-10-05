@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slice 4A are complete.
+Status: Slices 1-3 (through Slice 3E) and Slices 4A-4B are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -12,7 +12,9 @@ Status: Slices 1-3 (through Slice 3E) and Slice 4A are complete.
   only after fresh observation establishes A3.
 - Slice 4A implements safe one-location mutation for contracted
   `role: propagated` credentials.
-- Propagation-wave orchestration, restart execution, rollout waiting,
+- Slice 4B implements complete propagation-wave planning, durable immutable
+  intent, same-Secret grouping, and fresh-state resume reconciliation.
+- Propagation-wave mutation execution, restart execution, rollout waiting,
   runtime/service verification, SWITCH_TO_B, VERIFY_B, SWITCH_TO_A, VERIFY_A,
   lockout restoration, and all later orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
@@ -42,6 +44,7 @@ Status: Slices 1-3 (through Slice 3E) and Slice 4A are complete.
 | `breeder.py` | Direct canonical-breeder reads and UID/resourceVersion-conditional password/provenance patches. |
 | `rotate_a.py` | Bounded Slice 3D A0-to-A1 staging and Slice 3E A1-to-A3 core-credential convergence. |
 | `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it. |
+| `propagation_wave.py` | Plan complete propagated-location obligations, group them by Secret, and reconcile durable intent against fresh state. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -569,6 +572,61 @@ Slice 4A does not execute restart dependencies, orchestrate `SWITCH_TO_B` or
 `SWITCH_TO_A`, run `VERIFY_B` or `VERIFY_A`, wait for rollouts, or finalize the
 transaction. Those are later Slice 4 subslices. The contract-driven restart edges
 remain the model for those later runtime actions.
+
+### Implemented Slice 4B — propagation-wave planning and durable intent
+
+Slice 4B raises propagation planning from one location to the complete applicable
+contract set without performing any propagated-Secret mutation. A breakglass wave
+contains every `identity: active`, `role: propagated` location. An admin wave
+contains every active or fixed-admin propagated location. Source locations never
+participate, and fixed-admin locations never switch to breakglass. A location
+already at the target remains part of the obligation and is distinguished from a
+location that still requires mutation.
+
+The candidate plan groups logical locations by stable `(namespace, Secret name)`;
+Secret groups and their member location IDs are sorted deterministically. The
+group also retains the observed UID and resourceVersion. Those observations do
+not define grouping: UID is an observed-instance safety fact, so a same-name
+replacement is reported separately during resume. Each location retains only its
+stable ID, expected starting identity/target status, and potential restart
+dependencies. The wave contains no cleartext credential. Its target generation
+uses the existing SHA-256 generation reference.
+
+The immutable `PropagationWaveIntent` is embedded in the existing schema-v2
+`PropagationWave` for `to_b` or `to_a`; no second state store exists. It records:
+
+```text
+target identity and generation reference
+exact contract-semantics digest
+ordered Secret groups and logical location membership
+original Secret instance observations
+original classified identity/target state
+potential restart metadata
+```
+
+Read-only candidate construction and reconciliation require no Lease. Persisting
+new intent uses the existing conditionally updated transaction record and requires
+the current execution ownership assertion. Once intent exists it is reused
+exactly; a resume never replaces it by replanning. The planner compares the full
+current contract digest and exact applicable membership with durable intent, so
+added/removed locations, changed identity or role, moved Secrets, representation
+changes, and restart-metadata changes produce typed contract drift rather than an
+automatically expanded or reduced wave.
+
+`applied_location_ids` is intentionally only a progress hint. Fresh parsed and
+classified Secret state determines reconciliation: an incomplete location already
+at target is `ALREADY_CONVERGED`, while a recorded-complete location that is no
+longer at target is unsafe. Missing or replaced Secrets, unparseable
+representations, unknown credentials, and changes that contradict the original
+observation fail closed. Safe output distinguishes confirmed convergence,
+already-converged work, and work that still requires mutation.
+
+Restart edges carried by the plan are potential dependencies only. Slice 4B does
+not populate runtime actions or infer restart debt merely from membership. Slice
+4C must use actual changed mutation results, preserve the explicit same-Secret
+relationship during writes, and then record confirmed progress. Slice 4B does not
+call `mutate_credential_location()`, restart workloads, wait for rollouts, advance
+runtime phases, or complete the transaction.
 
 ## Security and deployment limits
 

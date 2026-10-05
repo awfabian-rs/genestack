@@ -373,9 +373,41 @@ class RuntimeActionProgress:
 
 
 @dataclass(frozen=True)
+class PropagationLocationIntent:
+    """Durable, credential-free intent for one logical contract location."""
+
+    location_id: str
+    expected_identity: Identity
+    expected_target: bool
+    potential_restart_dependencies: tuple[WorkloadRef, ...]
+
+
+@dataclass(frozen=True)
+class PropagationSecretGroupIntent:
+    """Logical locations sharing one stable Kubernetes object name."""
+
+    namespace: str
+    secret_name: str
+    observed_uid: str
+    observed_resource_version: str
+    locations: tuple[PropagationLocationIntent, ...]
+
+
+@dataclass(frozen=True)
+class PropagationWaveIntent:
+    """Immutable complete-set propagation obligation for one target generation."""
+
+    target_identity: Identity
+    target_generation: CredentialGeneration
+    contract_digest: ConfigurationDigest
+    secret_groups: tuple[PropagationSecretGroupIntent, ...]
+
+
+@dataclass(frozen=True)
 class PropagationWave:
     applied_location_ids: tuple[str, ...]
     runtime_actions: tuple[RuntimeActionProgress, ...]
+    intent: PropagationWaveIntent | None = None
 
 
 @dataclass(frozen=True)

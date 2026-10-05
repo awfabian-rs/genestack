@@ -1,7 +1,7 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slice 4A are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4B are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass and move the canonical admin credential through
 A0 -> A1 -> A2 -> A3. There is no complete end-to-end rotation command yet.
@@ -12,7 +12,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, and 4A are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, and 4B are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -44,8 +44,19 @@ from no-op and retain configured restart metadata without executing it. Conflict
 observations, Kubernetes failures, ambiguous writes, and verification failures
 are typed, credential-free errors.
 
-There is still no propagation-wave or phase runner. Grouping per-Secret writes,
-persisting propagation/action obligations, restart execution, rollout waiting,
+Slice 4B adds pure complete-set propagation-wave planning and reconciliation.
+For a requested admin or breakglass target it derives every applicable propagated
+contract location, deterministically groups logical locations that share a Secret,
+records their original classified state and potential restart dependencies, and
+can persist that credential-free intent in the existing transaction state under
+the existing ownership boundary. Resume retains the immutable stored intent and
+reconciles it against fresh Secret reality; progress is only a hint. Contract
+drift, missing or replaced Secrets, unparseable or unknown credentials, and
+unexplained state changes fail closed. Already-converged locations remain in the
+complete obligation and require no planned mutation.
+
+There is still no propagation-wave mutation or phase runner. Grouped per-Secret
+writes, confirmed restart-debt derivation, restart execution, rollout waiting,
 runtime/service verification, restoration of all consumers to admin,
 `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration, and
 final transaction completion remain unimplemented. Lockout suppression needed by

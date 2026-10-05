@@ -2,7 +2,7 @@
 
 ## Current project state
 
-This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slice 4A is complete.
+This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slices 4A-4B are complete.
 
 The project now includes mutation-capable library behavior.
 
@@ -87,6 +87,16 @@ Slice 4A
     fresh read-after-write parse and exact-target verification
     typed changed/no-op results with retained, unexecuted restart metadata
     typed secret-safe conflict, unsafe-state, ambiguity, and verification failures
+
+Slice 4B
+    complete contract-derived propagation-wave membership
+    deterministic logical-location grouping by namespace and Secret name
+    immutable credential-free intent in the existing transaction state
+    original classification, Secret-instance, generation, and restart metadata
+    fresh-state resume reconciliation with progress treated only as a hint
+    explicit already-converged, requires-mutation, and unsafe dispositions
+    exact contract-drift and changed-membership detection
+    ownership-fenced intent persistence without credential or workload mutation
 ```
 
 The CLI remains primarily read-only/planning-oriented. PREPARE_B and the bounded
@@ -101,16 +111,18 @@ performs `SWITCH_TO_B` or `VERIFY_B`, and production execution must not enter
 primitives do not bypass or weaken that gate. Slice 3D changes only the admin
 lockout option and canonical breeder Secret, then stops at observed A1. Slice 3E
 converges the core A credential to observed A3. Slice 4A can mutate one already
-classified propagated location, but no implemented runner propagates a complete
-wave, executes restart dependencies, waits for rollouts,
+classified propagated location. Slice 4B can durably describe and freshly
+reconcile a complete propagation obligation, but it does not execute that wave.
+No implemented runner performs grouped propagation writes, executes restart
+dependencies, waits for rollouts,
 performs runtime/service cutover verification, restores consumers to admin,
 executes `SWITCH_TO_A` / `VERIFY_A`, restores lockout policy, or completes the
 transaction.
 
-The next Slice 4 work must build on the one-location primitive without folding
-runtime actions or phase orchestration into it. Complete-wave intent/progress,
-same-Secret grouping, restart-debt recovery, workload actions, and phase gates
-remain later work.
+The next intended work is Slice 4C: propagation-wave mutation and recovery
+execution. It must build on the one-location primitive and durable grouped intent
+without folding workload actions or phase orchestration into either. Confirmed
+restart-debt recovery, workload actions, and phase gates remain later work.
 
 ## Read these first
 
@@ -679,6 +691,39 @@ for a workload, execute `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, or `VERIFY_A`,
 restore lockout policy, or finalize the transaction. Phase orchestration and
 runtime actions belong to later Slice 4 subslices.
 
+## Implemented Slice 4B
+
+`propagation_wave.py` plans the complete applicable `role: propagated` set from
+the validated contract and reconciled inventory. Breakglass intent includes all
+switchable active locations and excludes sources and fixed-admin locations. Admin
+intent includes active and fixed-admin propagated locations. Already-target
+locations remain members even though fresh reconciliation does not require a
+write for them.
+
+Logical locations are grouped by `(namespace, Secret name)`, never by UID, with
+stable Secret-group and location ordering. Each durable group retains its original
+UID/resourceVersion so resume can distinguish the intended object from a
+same-name replacement. The immutable intent also retains the exact contract
+digest, stable location identifiers, expected starting classifications, target
+identity/generation, and potential restart metadata. It contains no plaintext
+credential and lives inside the existing `PropagationWave` transaction record.
+
+On resume, do not regenerate or replace existing intent. Reconcile it with fresh
+contract and Secret state. Recorded progress is not authority: fresh target state
+can satisfy an incomplete hint, and fresh non-target state invalidates a complete
+hint. Missing/replaced Secrets, unknown credentials, parse failures, unexpected
+identity changes, target regression, target-generation mismatch, and contract
+drift are explicit unsafe outcomes. Material contract drift includes changed
+membership, identity/role, Secret placement, representation, or restart metadata;
+never auto-expand or shrink an in-progress wave.
+
+Planning and reconciliation are read-only. Persisting new intent is a transaction
+mutation and therefore uses the existing ownership assertion plus conditional
+state store. Restart dependencies remain potential: no runtime action or restart
+debt is created until Slice 4C observes an actual changed result. Slice 4B never
+calls `mutate_credential_location()`, writes propagated Secrets, restarts a
+workload, waits for rollout, advances cutover phases, or completes a transaction.
+
 ## Code-change discipline
 
 Make the smallest coherent change required by the current task.
@@ -732,9 +777,9 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 ## Suggested next-agent task
 
-Build the next bounded Slice 4 subslice on the completed one-location mutation
-primitive. Do not fold restart execution into `propagation.py`, bypass
-`SWITCH_TO_B` / `VERIFY_B`, or treat Slice 3E's A3 as transaction completion.
-Complete-wave intent/progress and same-Secret grouping should precede runtime
-action execution. Runtime cutover verification, lockout restoration, final
+Build Slice 4C — propagation-wave mutation and recovery execution — on the
+completed one-location primitive and immutable same-Secret-grouped wave intent.
+Do not fold restart execution into `propagation.py` or `propagation_wave.py`,
+bypass `SWITCH_TO_B` / `VERIFY_B`, or treat Slice 3E's A3 as transaction
+completion. Runtime actions, cutover verification, lockout restoration, final
 completion, and packaging remain later work.

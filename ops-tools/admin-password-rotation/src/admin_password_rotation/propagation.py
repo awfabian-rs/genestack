@@ -17,7 +17,7 @@ from .kubernetes_api import create_kubernetes_api, validate_api_options
 from .model import (
     CredentialLocation, CredentialState, FieldsRepresentation, Identity,
     IdentityBinding, IniRepresentation, LocationRole, ReferenceCredentials,
-    SecretField, SecretSnapshot, SecretValue, WorkloadRef,
+    ObservedCredential, SecretField, SecretSnapshot, SecretValue, WorkloadRef,
 )
 from .prepare_b import OwnershipGuard
 from .representations import mutate_credential_fields, read_credential
@@ -317,15 +317,23 @@ def _has_username(location: CredentialLocation) -> bool:
     return rep.username_path is not None
 
 
-def _matches_target(
-    location: CredentialLocation, secret: SecretSnapshot,
+def credential_matches_desired(
+    location: CredentialLocation, observed: ObservedCredential,
     desired: DesiredCredential,
 ) -> bool:
-    observed = read_credential(secret, location.representation)
     expected_username = desired.identity.value if _has_username(location) else None
     return (
         observed.username == expected_username
         and hmac.compare_digest(observed.password.reveal(), desired.password.reveal())
+    )
+
+
+def _matches_target(
+    location: CredentialLocation, secret: SecretSnapshot,
+    desired: DesiredCredential,
+) -> bool:
+    return credential_matches_desired(
+        location, read_credential(secret, location.representation), desired,
     )
 
 
