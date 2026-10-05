@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Protocol
 
 from .errors import ReadError
-from .model import SecretField, SecretInventory, SecretSnapshot, SecretValue
+from .model import (
+    SecretAnnotation, SecretField, SecretInventory, SecretSnapshot, SecretValue,
+)
 from .validation import is_identifier, is_object_name, nonempty_string, object_list, object_mapping
 
 MAX_INVENTORY_BYTES = 128 * 1024 * 1024
@@ -102,10 +104,23 @@ def parse_inventory(raw: bytes, namespace: str) -> SecretInventory:
             except (binascii.Error, ValueError):
                 raise ReadError("invalid_base64", "Secret data contains invalid base64; input withheld.") from None
             fields.append(SecretField(key, SecretValue(decoded)))
+        annotation_values = meta.get("annotations")
+        annotation_data = (
+            {} if annotation_values is None else object_mapping(annotation_values)
+        )
+        annotations: list[SecretAnnotation] = []
+        for key, annotation_value in annotation_data.items():
+            if not key or not isinstance(annotation_value, str):
+                raise ReadError(
+                    "invalid_secret_annotations",
+                    "Secret annotations must map nonempty string keys to strings.",
+                )
+            annotations.append(SecretAnnotation(key, annotation_value))
         result.append(SecretSnapshot(
             namespace, name, nonempty_string(meta.get("uid")),
             nonempty_string(meta.get("resourceVersion")),
             tuple(sorted(fields, key=lambda x: x.key)),
+            tuple(sorted(annotations, key=lambda x: x.key)),
         ))
     return SecretInventory(namespace, resource_version, tuple(sorted(result, key=lambda x: x.name)))
 

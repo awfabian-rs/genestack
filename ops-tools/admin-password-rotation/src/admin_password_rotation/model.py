@@ -112,15 +112,25 @@ class SecretField:
 
 
 @dataclass(frozen=True)
+class SecretAnnotation:
+    key: str
+    value: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class SecretSnapshot:
     namespace: str
     name: str
     uid: str
     resource_version: str
     data: tuple[SecretField, ...] = field(repr=False)
+    annotations: tuple[SecretAnnotation, ...] = field(default=(), repr=False)
 
     def get(self, key: str) -> SecretValue | None:
         return next((x.value for x in self.data if x.key == key), None)
+
+    def annotation(self, key: str) -> str | None:
+        return next((x.value for x in self.annotations if x.key == key), None)
 
 
 @dataclass(frozen=True)
@@ -275,6 +285,7 @@ class RuntimeActionState(Enum):
 class LockoutChangeState(Enum):
     NOT_INTENDED = "not_intended"
     INTENT_PERSISTED = "intent_persisted"
+    DISPATCH_UNRESOLVED = "dispatch_unresolved"
     EFFECT_OBSERVED = "effect_observed"
 
 
