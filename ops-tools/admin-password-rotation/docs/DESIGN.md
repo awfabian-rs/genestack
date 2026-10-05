@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, and 3E are implemented.
+Status: Slices 1-3 (through Slice 3E) are complete. Slice 4A is next.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -10,8 +10,10 @@ Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, and 3E are implemented.
   staging, stopping only after fresh observation establishes A1.
 - Slice 3E implements forward-only core A convergence from A1/A2/A3, stopping
   only after fresh observation establishes A3.
-- SWITCH_TO_B, VERIFY_B, consumer propagation, SWITCH_TO_A, VERIFY_A, lockout
-  restoration, and all later orchestration remain unimplemented.
+- Propagation through contracted `role: propagated` locations, restart execution,
+  rollout waiting, runtime/service verification, SWITCH_TO_B, VERIFY_B,
+  SWITCH_TO_A, VERIFY_A, lockout restoration, and all later orchestration remain
+  unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -131,15 +133,15 @@ all causal locations. Source and fixed-identity locations do not drive that cuto
 list. Empty restart lists remain meaningful.
 
 These are not actual restarts, nor a single deduplicated list for an
-entire A->B->A transaction. The future executor must derive actions from
-actual changes and distinguish the B and A transitions. The Slice 1
-planner has no resumed-action receipts, action tokens, ownership
-protocol or transaction journal; those concerns belong to later
-implementation layers described below.
+entire A->B->A transaction. A later Slice 4 runtime subslice must derive actions
+from actual changes and distinguish the B and A transitions. The Slice 1 planner
+itself has no resumed-action receipts, action tokens, ownership protocol or
+transaction journal; those concerns belong to the transaction and runtime layers
+described below.
 
 Secret UID and resourceVersion are retained as opaque observations. They are not
 ordered or incremented. The inventory is a finite observation, not a lock across
-Kubernetes, PasswordSafe and Keystone. Any future mutating command must acquire
+Kubernetes, PasswordSafe and Keystone. Any mutating workflow must acquire
 ownership and reread relevant state; a saved report cannot be applied.
 
 ## Durable transaction state
@@ -238,10 +240,10 @@ from the owner-side monotonic renewal-freshness timer used by `assert_owned()`.
 
 Fresh acquisition, continued same-execution ownership and expired-Lease takeover
 are distinct results. An expired takeover makes the new execution the current
-cooperative owner, but it is explicitly marked as requiring a later recovery gate.
+cooperative owner, but it is explicitly marked as requiring a subsequent recovery gate.
 Lease expiry is not proof that the previous process is dead or unable to call
-Keystone, PasswordSafe or Kubernetes. The Lease is not hard fencing. Future
-mutation code must combine current ownership with fresh external observations,
+Keystone, PasswordSafe or Kubernetes. The Lease is not hard fencing. Mutation
+workflows must combine current ownership with fresh external observations,
 object-level concurrency and transaction recovery checks.
 
 ## External credential-system boundaries
@@ -259,14 +261,14 @@ act again.
 For external mutations, a non-success or malformed response does not by itself
 prove that the server did not apply the change. Transport failures, 5xx responses,
 unexpected 2xx responses, and untrustworthy success responses are reported as
-ambiguous when application cannot be ruled out. Later workflow must reobserve the
+ambiguous when application cannot be ruled out. Workflow code must reobserve the
 actual external state before deciding whether another mutation is permitted.
 
 Keystone v3 password authentication has three typed outcomes: success, definite
 credential rejection, and indeterminate. Only an unambiguous authentication 401
 is credential rejection. Transport, server, policy and malformed-response failures
 remain indeterminate. Success includes the observed user, domain, project, roles
-and expiry so future policy can validate identity and scope rather than treating
+and expiry so workflow policy can validate identity and scope rather than treating
 token issuance alone as sufficient. Administrative password updates address the
 recorded user ID, and lockout-option updates patch only
 `ignore_lockout_failure_attempts`. Both operations use `PATCH /v3/users/{user_id}`
@@ -340,8 +342,8 @@ ownership assertion, durable dispatch-unresolved recording, one non-retried
 external write, and postcondition verification. PasswordSafe B staging is
 PREPARE_B's first PasswordSafe mutation;
 its verified read-back establishes PasswordSafe mutation capability. PREPARE_B
-does not mutate PasswordSafe A or the admin lockout option. The later real
-lockout-suppression mutation establishes that capability before A rotation.
+does not mutate PasswordSafe A or the admin lockout option. Slice 3D's real
+lockout-suppression mutation establishes that capability before mutating A.
 Verification results retain bounded timestamps and generation identifiers, never
 credential values.
 
@@ -457,6 +459,50 @@ breeder, Keystone, and PasswordSafe at fresh A3. The transaction remains in
 propagation, runtime actions, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration,
 final transaction completion, and deployment packaging remain separate later
 work.
+
+The canonical `ROTATE_A` write order is fixed:
+
+```text
+breeder -> Keystone -> PasswordSafe
+```
+
+The A0/A1/A2/A3 columns are PasswordSafe / breeder / Keystone:
+
+```text
+A0 = old / old / old
+A1 = old / new / old
+A2 = old / new / new
+A3 = new / new / new
+```
+
+Completing Slice 3 does not complete the A -> B -> A transaction. In particular,
+no implemented path propagates admin or breakglass into contracted propagated
+locations, executes their restart dependencies, waits for workload rollouts,
+performs service/runtime verification after cutover, restores all consumers to
+admin, or performs final `VERIFY_A` and transaction completion. `VERIFY_B` must
+succeed before a production runner enters `ROTATE_A`; independent development and
+testing of the bounded `ROTATE_A` machinery does not relax that entry condition.
+
+### Slice 4A — credential propagation mutation engine
+
+Slice 4A is the next implementation boundary. It safely mutates one validated
+contracted `role: propagated` credential location to an explicitly requested
+allowed identity and credential. It covers the existing `FieldsRepresentation`,
+`IniRepresentation`, and `YamlRepresentation`, including nested YAML selected by
+`document_path`, and requires:
+
+```text
+structural mutation
+identity and observed-state validation
+UID/resourceVersion optimistic concurrency
+fresh read-after-write verification
+changed / no-op / failure reporting
+```
+
+It does not execute restart dependencies, orchestrate `SWITCH_TO_B` or
+`SWITCH_TO_A`, run `VERIFY_B` or `VERIFY_A`, wait for rollouts, or finalize the
+transaction. Those are later Slice 4 subslices. The contract-driven restart edges
+remain the model for those later runtime actions.
 
 ## Security and deployment limits
 
