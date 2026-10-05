@@ -59,13 +59,24 @@ Slice 3C
     typed A0/A1/A2/A3 classification
     typed invalid and indeterminate reconciliation outcomes
     secret-free observation/result records
+
+Slice 3D
+    fresh A0 starting-state gate through Slice 3C
+    fresh exact breakglass administrative validation
+    durable lockout-restoration intent and real suppression mutation
+    positive suppression read-back and ambiguity reconciliation
+    secure A-new generation with pre-/post-dispatch recovery semantics
+    conditional canonical breeder staging with transaction provenance
+    fresh observed A1 completion while lockout remains suppressed
 ```
 
-The CLI remains primarily read-only/planning-oriented. PREPARE_B is available as
-a library workflow, and A-state reconciliation is available as a read-only library
-boundary; the end-to-end rotation command is not implemented.
+The CLI remains primarily read-only/planning-oriented. PREPARE_B and Slice 3D are
+available as bounded library workflows, and A-state reconciliation is available as
+a read-only library boundary; the end-to-end rotation command is not implemented.
 
-No implemented path performs SWITCH_TO_B, any A mutation, or any later phase.
+No implemented path performs SWITCH_TO_B, VERIFY_B, the Keystone admin password
+reset, the PasswordSafe A update, or any later phase. Slice 3D changes only the
+admin lockout option and canonical breeder Secret, then stops at observed A1.
 
 ## Read these first
 
@@ -399,24 +410,18 @@ Keystone admin, update PasswordSafe A, write transaction progress, propagate a
 credential or run workload actions. Lockout remains a separate typed transaction
 fact and is not part of the A0-A3 enum.
 
-## Next implementation increment
+## Current Slice 3D boundary
 
-The next coding task is **Slice 3D**, a bounded `ROTATE_A` library capability.
-Implementation order is distinct from runtime execution order: Slice 3D may be
-built before `SWITCH_TO_B` and `VERIFY_B`, but no end-to-end runner may invoke it
-without those required runtime gates.
+Slice 3D is implemented as a bounded `ROTATE_A` library capability. Implementation
+order remains distinct from runtime execution order: no end-to-end runner may call
+it without the still-required `SWITCH_TO_B` and `VERIFY_B` gates.
 
-Slice 3D should:
-
-1. consume the existing Slice 3C classifier;
-2. require the appropriate A0 starting state;
-3. use freshly verified breakglass authorization to enable admin lockout suppression;
-4. read back and positively verify that suppression is active;
-5. generate A-new;
-6. persist the intended A-new generation and breeder-staging intent;
-7. conditionally stage A-new in the canonical breeder Secret;
-8. reobserve external reality and establish A1; and
-9. stop before changing the Keystone admin password.
+It consumes Slice 3C, starts new staging only from A0, freshly verifies exact
+breakglass administrative authority, durably records restoration intent before the
+real lockout suppression mutation, and positively reads suppression back. It then
+generates and durably identifies A-new, conditionally stages only the canonical
+breeder password plus transaction provenance, and succeeds only after fresh A1
+classification. It leaves lockout suppressed and restoration required.
 
 Slice 3E will later handle forward recovery: A1 resets Keystone admin to the
 exact staged A-new, A2 updates PasswordSafe admin to that exact value, and A3
@@ -569,9 +574,8 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 A suitable next task is:
 
-> Implement Slice 3D only as a bounded `ROTATE_A` library capability. Consume the
-> Slice 3C classifier, require A0, enable and verify lockout suppression with
-> breakglass authorization, generate and durably identify A-new, conditionally
-> stage it in the canonical breeder, reobserve A1, and stop before the Keystone
-> admin password reset. Do not implement or bypass the `SWITCH_TO_B` and
-> `VERIFY_B` runtime gates, Slice 3E, propagation, runtime actions, or packaging.
+> Implement Slice 3E forward recovery only: consume observed A1/A2/A3 reality,
+> reset Keystone admin to the exact already-staged A-new for A1, update the
+> authoritative PasswordSafe A record for A2, and establish A3. Do not implement
+> or bypass `SWITCH_TO_B` / `VERIFY_B`, consumer propagation, `SWITCH_TO_A`,
+> `VERIFY_A`, lockout restoration, final completion, runtime actions, or packaging.

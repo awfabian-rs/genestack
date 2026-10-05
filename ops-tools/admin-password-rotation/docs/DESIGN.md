@@ -1,12 +1,13 @@
 # Design
 
-Status: Slices 1, 2A, 2B, 2C, 3A, 3B, and 3C are implemented.
+Status: Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, and 3D are implemented.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
 - Read-only A0/A1/A2/A3 credential-state observation and classification is
   implemented as a library boundary.
-- SWITCH_TO_B, A mutation, and all later orchestration remain unimplemented.
+- SWITCH_TO_B, VERIFY_B, Keystone/PasswordSafe A mutation, and all later
+  orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -392,17 +393,26 @@ STABLE_A -> PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A
     -> SWITCH_TO_A -> VERIFY_A -> STABLE_A
 ```
 
-Implementation slices need not be built in that execution order. Slice 3D is the
-next implementation increment and adds a bounded `ROTATE_A` library capability;
-this does not authorize an end-to-end runner to invoke it before the still-required
+Implementation slices need not be built in that execution order. Slice 3D is now
+implemented as the bounded `run_rotate_a_stage_breeder` library capability; this
+does not authorize an end-to-end runner to invoke it before the still-required
 `SWITCH_TO_B` and `VERIFY_B` runtime gates.
 
-Slice 3D will consume the Slice 3C classifier, require the appropriate A0 state,
-use freshly verified breakglass authorization to enable admin lockout suppression,
-and positively read back that suppression is active. It will then generate A-new,
-persist its intended generation and breeder-staging intent, conditionally stage it
-in the canonical breeder Secret, reobserve external reality to establish A1, and
-stop before changing the Keystone admin password.
+Slice 3D consumes the Slice 3C classifier and begins new staging only from freshly
+observed A0. It freshly retrieves and authenticates the authoritative breakglass
+credential, persists restoration intent, conditionally suppresses admin lockout by
+exact user ID, and requires a positive user read-back before generating A-new.
+Only A-new's SHA-256 generation identifier is durable. A candidate lost before
+breeder dispatch may be replaced; after `STAGE_A_BREEDER` reaches
+`DISPATCH_UNRESOLVED`, its generation is sticky.
+
+The canonical `Secret/openstack/keystone-admin` write uses a direct Kubernetes
+JSON Patch with UID and resourceVersion tests, replaces only `data.password`, and
+atomically adds transaction ID, A-new generation and `pending-keystone` provenance.
+Read-back verifies identity, generation and provenance. Success requires fresh
+Slice 3C observation of A1. Lockout remains suppressed, restoration remains
+required, and the transaction remains in `ROTATE_A`; no Keystone admin password or
+PasswordSafe A mutation is performed.
 
 Slice 3E will later provide forward recovery: A1 resets Keystone admin to the exact
 staged A-new, A2 updates PasswordSafe admin to that exact value, and A3 means A
