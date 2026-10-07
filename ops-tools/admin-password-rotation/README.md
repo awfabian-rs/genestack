@@ -1,7 +1,7 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4B are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4C are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass and move the canonical admin credential through
 A0 -> A1 -> A2 -> A3. There is no complete end-to-end rotation command yet.
@@ -12,7 +12,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, and 4B are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, and 4C are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -55,11 +55,26 @@ drift, missing or replaced Secrets, unparseable or unknown credentials, and
 unexplained state changes fail closed. Already-converged locations remain in the
 complete obligation and require no planned mutation.
 
-There is still no propagation-wave mutation or phase runner. Grouped per-Secret
-writes, confirmed restart-debt derivation, restart execution, rollout waiting,
-runtime/service verification, restoration of all consumers to admin,
-`SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration, and
-final transaction completion remain unimplemented. Lockout suppression needed by
+Slice 4C adds grouped Secret-level propagation execution and crash/recovery.
+It consumes the durable Slice 4B wave intent, performs a safe pre-reconciliation
+pass over every Secret group (fresh GET, per-location classification, UID
+continuity check), and only then composes the required transformations and issues
+at most one CAS-protected JSON Patch per Secret group. After each write it
+freshly rereads the Secret and verifies every logical location in the group
+against the target credential. It records which logical locations actually
+changed (distinguishing changed from already-converged), persists that progress
+through the existing transaction state, and retains the resulting restart
+dependencies for the later restart-debt slice without executing any restart.
+Unknown, malformed, replaced, or regressed state fails closed with no write.
+The Kubernetes Secret is the mutation unit; the logical credential location is
+the verification/accounting unit; the propagation wave is the transaction unit.
+
+There is still no propagation-wave phase runner or restart execution. Slice 4C
+safely executes the grouped per-Secret credential writes and records the actual
+changed-location accounting, but it does not execute workload restarts, wait for
+rollouts, discharge restart debt, perform runtime/service verification, restore all
+consumers to admin, `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout
+restoration, or final transaction completion. Lockout suppression needed by
 `ROTATE_A` is implemented, but the current Slice 3 path leaves it suppressed with
 restoration still required.
 

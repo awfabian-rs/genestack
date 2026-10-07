@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slices 4A-4B are complete.
+Status: Slices 1-3 (through Slice 3E) and Slices 4A-4C are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -14,9 +14,13 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4B are complete.
   `role: propagated` credentials.
 - Slice 4B implements complete propagation-wave planning, durable immutable
   intent, same-Secret grouping, and fresh-state resume reconciliation.
-- Propagation-wave mutation execution, restart execution, rollout waiting,
-  runtime/service verification, SWITCH_TO_B, VERIFY_B, SWITCH_TO_A, VERIFY_A,
-  lockout restoration, and all later orchestration remain unimplemented.
+- Slice 4C implements grouped Secret-level propagation execution and
+  crash/recovery: a safe pre-reconciliation pass, one CAS-protected write per
+  Secret group, fresh per-location verification, and actual changed-location
+  accounting. It does not execute restarts or advance runtime phases.
+- Restart execution, rollout waiting, runtime/service verification, SWITCH_TO_B,
+  VERIFY_B, SWITCH_TO_A, VERIFY_A, lockout restoration, and all later
+  orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -43,8 +47,9 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4B are complete.
 | `a_state.py` | Read-only authoritative A-credential observation and A0-A3 reconciliation. |
 | `breeder.py` | Direct canonical-breeder reads and UID/resourceVersion-conditional password/provenance patches. |
 | `rotate_a.py` | Bounded Slice 3D A0-to-A1 staging and Slice 3E A1-to-A3 core-credential convergence. |
-| `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it. |
+| `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it; execute a grouped Secret-level propagation wave with crash/recovery and changed-location accounting. |
 | `propagation_wave.py` | Plan complete propagated-location obligations, group them by Secret, and reconcile durable intent against fresh state. |
+| `wave_digest.py` | Shared credential-free wave planning primitives (contract digest and membership) used by both planning and grouped execution. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
 Configuration validates before any live read. Namespace is fixed to `openstack`
@@ -627,6 +632,89 @@ not populate runtime actions or infer restart debt merely from membership. Slice
 relationship during writes, and then record confirmed progress. Slice 4B does not
 call `mutate_credential_location()`, restart workloads, wait for rollouts, advance
 runtime phases, or complete the transaction.
+
+### Implemented Slice 4C — grouped Secret-level propagation execution
+
+Slice 4C raises propagation from one-location mutation to executing a complete
+durable wave. The mutation unit is the Kubernetes Secret; the logical credential
+location is the verification and accounting unit; the propagation wave is the
+transaction unit. For a group of logical locations sharing one Secret, Slice 4C
+performs at most one coherent Secret mutation when mutation is required, rather
+than invoking the Slice 4A one-location API repeatedly against the same Secret.
+
+`execute_grouped_propagation_wave()` consumes the durable Slice 4B wave intent
+(`PropagationWave` plus its `intent`), a fresh credential reference for the
+target, and current transaction ownership, then:
+
+```text
+safe pre-reconciliation pass over every Secret group
+    ->
+compose required per-location transformations in memory
+    ->
+one CAS-protected Secret write per group that needs it
+    ->
+fresh reread + per-location verification
+    ->
+persist changed-location progress
+```
+
+**Safe pre-reconciliation pass.** Before any write, every group is freshly
+observed: the Secret is GET, its UID is checked against the durable observed UID
+(a same-name replacement fails closed), and every participating logical location
+is parsed and classified against the known credential references. A group may
+safely contain a mixture (for example two admin locations and one breakglass
+location when the target is breakglass) so long as every state is recognized and
+allowed by the persisted intent; only the non-target locations require
+transformation. Unknown credentials, unparseable representations, replaced
+Secrets, a location recorded-complete that is no longer at target (regression),
+and a current identity that contradicts durable intent all fail the wave closed
+with no Secret write. This pass is what guarantees that an unknown or malformed
+member in one group produces no write anywhere in the wave.
+
+**Grouped composition.** The per-location structural transformations (reusing
+Slice 4A's `mutate_credential_fields()`) are merged by `compose_group_replacements()`
+into one set of Secret data-key replacements. Distinct data keys combine
+independently. When two logical locations modify the same data key (for example
+distinct INI options in one file), the results are composed only when they are
+byte-identical (same declared span); otherwise the group is rejected with
+`GROUP_COMPOSITION_CONFLICT` rather than depending on mutation order, because each
+representation serializer re-serializes the whole document from its own parse and
+a naive second pass would discard the first change.
+
+**One conditional write per group.** Each group that requires mutation issues a
+single JSON Patch guarded by atomic UID and resourceVersion tests, using the
+freshly observed Secret as the CAS precondition (never the planning-time
+resourceVersion). The patch replaces only the data keys that actually change.
+A definite conditional rejection is a `CONFLICT` (no blind retry); an ambiguous
+outcome is a `WRITE_AMBIGUOUS` and is resolved by fresh reobservation on resume,
+not by re-issuing the write.
+
+**Fresh verification.** A successful write response is not verification. After
+each group write the Secret is freshly reread, its UID is required to match, and
+every logical location in the group is reparsed and required to exactly equal the
+target credential. Any deviation is `POST_WRITE_VERIFICATION_FAILED`.
+
+**Changed-location accounting.** For each logical location Slice 4C distinguishes
+`ALREADY_CONVERGED` (freshly at target, no write this run) from
+`CHANGED_BY_THIS_PROPAGATION` (required and performed a mutation). Durable
+progress (`applied_location_ids`) advances only for locations that actually
+changed plus locations that were already recorded-complete and remain at target.
+Restart dependencies are retained from the locations that actually changed and
+are passed to the later restart-debt slice; Slice 4C performs no restart.
+
+**Crash/recovery.** Because fresh state is authoritative and progress is a hint:
+a crash before the Secret write resumes to the mutation; a crash after the write
+but before progress persistence resumes to an already-converged observation with
+no duplicate write; a crash after progress persistence resumes to a confirmed
+converged state; and progress claiming completion while fresh state regressed is
+treated as unsafe. The wave is credential-converged when fresh observation
+establishes every intended location at the target and durable progress has been
+reconciled — this means only credential propagation is complete, not that runtime
+consumers are using the new credential.
+
+Slice 4C does not execute workload restarts, wait for rollouts, discharge restart
+debt, perform `SWITCH_TO_B`/`VERIFY_B`/`SWITCH_TO_A`/`VERIFY_A`, restore lockout,
+or complete the transaction. Those are later slices.
 
 ## Security and deployment limits
 

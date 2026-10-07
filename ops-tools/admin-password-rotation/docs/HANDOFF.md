@@ -2,7 +2,7 @@
 
 ## Current project state
 
-This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slices 4A-4B are complete.
+This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slices 4A-4C are complete.
 
 The project now includes mutation-capable library behavior.
 
@@ -97,13 +97,23 @@ Slice 4B
     explicit already-converged, requires-mutation, and unsafe dispositions
     exact contract-drift and changed-membership detection
     ownership-fenced intent persistence without credential or workload mutation
+
+Slice 4C
+    safe pre-reconciliation pass over every Secret group before any write
+    grouped Secret-level mutation: at most one CAS-protected JSON Patch per group
+    same-data-key composition with explicit conflict rejection
+    fresh per-location post-write verification
+    actual changed-location accounting (changed vs already-converged)
+    durable progress persistence through the existing transaction state
+    crash/recovery: no duplicate write on resume, regression fails closed
+    retained restart metadata for the later restart-debt slice, no restarts
 ```
 
-The CLI remains primarily read-only/planning-oriented. PREPARE_B and the bounded
-Slice 3 `ROTATE_A` workflows are implemented library capabilities, and A-state
-reconciliation is available as their read-only authority boundary. The code can
-establish/reconcile breakglass and move canonical admin through
-A0 -> A1 -> A2 -> A3. The end-to-end rotation command is not implemented.
+The next intended work is Slice 4D: restart/action executor and restart-debt
+recovery. It consumes Slice 4C's confirmed changed-location accounting and the
+retained restart dependencies to perform the actual workload restarts and
+rollout waiting. Workload actions, phase gates, cutover verification, lockout
+restoration, final completion, and packaging remain later work.
 
 The deployment has not yet been cut over between A and B. No implemented runner
 performs `SWITCH_TO_B` or `VERIFY_B`, and production execution must not enter
@@ -112,17 +122,12 @@ primitives do not bypass or weaken that gate. Slice 3D changes only the admin
 lockout option and canonical breeder Secret, then stops at observed A1. Slice 3E
 converges the core A credential to observed A3. Slice 4A can mutate one already
 classified propagated location. Slice 4B can durably describe and freshly
-reconcile a complete propagation obligation, but it does not execute that wave.
-No implemented runner performs grouped propagation writes, executes restart
-dependencies, waits for rollouts,
-performs runtime/service cutover verification, restores consumers to admin,
-executes `SWITCH_TO_A` / `VERIFY_A`, restores lockout policy, or completes the
-transaction.
-
-The next intended work is Slice 4C: propagation-wave mutation and recovery
-execution. It must build on the one-location primitive and durable grouped intent
-without folding workload actions or phase orchestration into either. Confirmed
-restart-debt recovery, workload actions, and phase gates remain later work.
+reconcile a complete propagation obligation. Slice 4C can safely execute that
+wave with grouped per-Secret writes and changed-location accounting, but it does
+not execute restarts or advance runtime phases. No implemented runner performs
+workload restarts, waits for rollouts, performs runtime/service cutover
+verification, restores consumers to admin, executes `SWITCH_TO_A` / `VERIFY_A`,
+restores lockout policy, or completes the transaction.
 
 ## Read these first
 
@@ -724,6 +729,59 @@ debt is created until Slice 4C observes an actual changed result. Slice 4B never
 calls `mutate_credential_location()`, writes propagated Secrets, restarts a
 workload, waits for rollout, advances cutover phases, or completes a transaction.
 
+## Implemented Slice 4C
+
+`propagation.py` now contains `execute_grouped_propagation_wave()`, which
+safely executes the durable Slice 4B wave. The mutation unit is the Kubernetes
+Secret; the logical credential location is the verification/accounting unit; the
+wave is the transaction unit. For one Secret holding several participating
+logical locations, it performs one coherent Secret mutation when mutation is
+required. It does not naively invoke the Slice 4A one-location API repeatedly
+against the same Secret.
+
+Before any write, every Secret group is freshly observed: GET, UID continuity
+check against the durable observed UID, and per-location parse/classification
+against the known credential references. A group may safely contain a mixture of
+admin/breakglass/target states so long as every state is recognized and allowed
+by the persisted intent; only the non-target locations require transformation.
+Unknown credentials, unparseable representations, replaced Secrets, a
+recorded-complete location that is no longer at target, and a current identity
+that contradicts durable intent fail the whole wave closed with no Secret write.
+
+Per-location structural transformations reuse Slice 4A's
+`mutate_credential_fields()` and are merged by `compose_group_replacements()`
+into one set of data-key replacements. Distinct data keys combine independently.
+When two locations modify the same data key, the group is rejected with
+`GROUP_COMPOSITION_CONFLICT` unless their per-location results are byte-identical
+(same declared span), because each representation serializer re-serializes the
+whole document from its own parse and a naive second pass would discard the first
+change.
+
+Each group that needs mutation issues a single JSON Patch guarded by atomic UID
+and resourceVersion tests, using the freshly observed Secret as the CAS
+precondition (never the planning-time resourceVersion). A definite conditional
+rejection is a `CONFLICT` (no blind retry); an ambiguous outcome is a
+`WRITE_AMBIGUOUS` resolved by fresh reobservation on resume. After each write the
+Secret is freshly reread and every logical location is reparsed and required to
+exactly equal the target credential.
+
+Slice 4C distinguishes `ALREADY_CONVERGED` from `CHANGED_BY_THIS_PROPAGATION`
+per logical location. Durable progress (`applied_location_ids`) advances only for
+locations that actually changed plus locations already recorded-complete and
+still at target. Restart dependencies are retained from the actually-changed
+locations for the later restart-debt slice; Slice 4C performs no restart.
+
+Crash/recovery follows the existing "fresh state is authoritative, progress is a
+hint" model: a crash before the write resumes to the mutation; a crash after the
+write but before progress persistence resumes to an already-converged observation
+with no duplicate write; and progress claiming completion while fresh state
+regressed is treated as unsafe. The wave is credential-converged when fresh
+observation establishes every intended location at the target — this does not
+mean runtime consumers are using the new credential; that requires the later
+restart/action slice. Slice 4C does not execute workload restarts, wait for
+rollouts, discharge restart debt, perform `SWITCH_TO_B`/`VERIFY_B`/
+`SWITCH_TO_A`/`VERIFY_A`, restore lockout, or complete the transaction.
+
 ## Code-change discipline
 
 Make the smallest coherent change required by the current task.
@@ -777,9 +835,10 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 ## Suggested next-agent task
 
-Build Slice 4C — propagation-wave mutation and recovery execution — on the
-completed one-location primitive and immutable same-Secret-grouped wave intent.
-Do not fold restart execution into `propagation.py` or `propagation_wave.py`,
-bypass `SWITCH_TO_B` / `VERIFY_B`, or treat Slice 3E's A3 as transaction
-completion. Runtime actions, cutover verification, lockout restoration, final
+Build Slice 4D — restart/action executor and restart-debt recovery — on the
+Slice 4C confirmed changed-location accounting and retained restart
+dependencies. It must perform the actual workload restarts and rollout waiting
+derived from locations that changed during the propagation transaction, without
+bypassing `SWITCH_TO_B` / `VERIFY_B`, restoring lockout, or treating A3 as
+transaction completion. Cutover verification, lockout restoration, final
 completion, and packaging remain later work.
