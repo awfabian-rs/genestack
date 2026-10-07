@@ -67,8 +67,9 @@ group; multiple logical locations sharing one Secret data key are all mutated
 together in deterministic order. After each write it freshly rereads the Secret
 and verifies every logical location in the group against the target credential.
 It records which logical locations actually changed (distinguishing changed from
-already-converged), persists that progress after each successfully processed
-group through the existing transaction state, and retains the resulting restart
+already-converged), reasserts execution ownership before each durable progress
+write, persists that progress after each successfully processed group through the
+existing transaction state, and retains the resulting restart
 dependencies for the later restart-debt slice without executing any restart.
 An originally-non-target location observed at target during recovery but with no
 applied marker is conservatively treated as a transition that occurred during the

@@ -892,8 +892,8 @@ def execute_grouped_propagation_wave(
         all_changed |= changed_now
         all_restarts |= set(outcome.restart_dependencies)
         current_wave = _persist_group_progress(
-            session, target=desired.identity, wave=current_wave,
-            applied=applied, now=now,
+            session, ownership=ownership, target=desired.identity,
+            wave=current_wave, applied=applied, now=now,
         )
 
     return GroupedWaveResult(
@@ -908,10 +908,17 @@ def execute_grouped_propagation_wave(
 
 
 def _persist_group_progress(
-    session: GroupedPropagationSession, *, target: Identity,
-    wave: PropagationWave, applied: set[str], now: datetime,
+    session: GroupedPropagationSession, *, ownership: OwnershipGuard,
+    target: Identity, wave: PropagationWave, applied: set[str],
+    now: datetime,
 ) -> PropagationWave:
     """Persist wave progress after one group so accounting survives a crash.
+
+    Reasserts execution ownership immediately before the durable write: the
+    state-store update is itself a mutation and must obey the same Lease/ownership
+    discipline as Secret writes.  If ownership is lost, raises ``OWNERSHIP_LOST``
+    and does not update transaction state.  When there is no state change to
+    write, no ownership assertion is performed.
 
     Returns the updated wave (so the caller can track it across groups) or the
     original wave when nothing changed.
@@ -921,6 +928,7 @@ def _persist_group_progress(
         return wave
     updated = replace(wave, applied_location_ids=applied_sorted)
     transaction = _replace_wave_for_target(session.transaction, target, updated)
+    _assert_grouped_owned(ownership)
     session.write(replace(transaction, updated_at=now))
     return updated
 

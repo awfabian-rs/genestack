@@ -787,7 +787,10 @@ A location already target at wave creation (`expected_target == True`) is not
 restart debt merely because it remains target. Verified progress is persisted
 after each successfully processed group, not only at the end of the wave, so
 changed/restart-debt accounting survives a crash between a write and wave
-completion.
+completion. Execution ownership is reasserted immediately before each durable
+progress write: the state-store update is itself a mutation that must obey the
+same Lease/ownership discipline as Secret writes. If ownership is lost, the
+executor raises `OWNERSHIP_LOST` and does not update transaction state.
 
 Crash/recovery follows the existing "fresh state is authoritative, progress is a
 hint" model: a crash before the write resumes to the mutation; a crash after the

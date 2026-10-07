@@ -690,7 +690,12 @@ full wave. This shrinks the window in which a successful write is not yet backed
 by durable accounting. The unavoidable crash between a successful write and the
 subsequent progress persistence is still handled by the recovery rule above: on
 resume the Secret is already target and the originally-non-target location's
-restart debt is reconstructed from the durable intent.
+restart debt is reconstructed from the durable intent. Execution ownership is
+reasserted immediately before each durable progress write: the state-store
+update is itself a mutation and must obey the same Lease/ownership discipline as
+Secret writes. If ownership is lost, the executor raises `OWNERSHIP_LOST` and
+does not update transaction state; recovery is left to the next valid executor.
+When there is no state change to write, no ownership assertion is performed.
 
 **One conditional write per group.** Each group that requires mutation issues a
 single JSON Patch guarded by atomic UID and resourceVersion tests, using the

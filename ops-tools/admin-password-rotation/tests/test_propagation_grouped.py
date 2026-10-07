@@ -892,6 +892,82 @@ def test_no_write_after_ownership_loss() -> None:
     assert client.replace_calls == 0
 
 
+# 24a. Ownership is reasserted before durable progress persistence.
+#
+# A group completes its Secret write and verification successfully, but the
+# executor loses ownership before the progress-persistence write.  The durable
+# state must not be updated: the progress write is itself a mutation that must
+# obey the Lease/ownership discipline.
+def test_ownership_reasserted_before_progress_persistence() -> None:
+    parsed = contract(_fields_contract_text())
+    base = _fields_secrets()
+    wave, _ = _wave_for(parsed, base)
+    client = _client(base)
+    store = MemoryStateStore(_state(wave))
+    owner = Ownership()
+    original_read = client.read
+
+    def read_side_effect(ns: str, name: str):
+        result = original_read(ns, name)
+        # After the second Secret read (shared-consumers' post-write
+        # verification read), ownership is lost.  The executor then attempts
+        # to persist progress and must raise OWNERSHIP_LOST.
+        if client.read_calls >= 4:
+            owner.fail = True
+        return result
+
+    client.read = read_side_effect  # type: ignore[method-assign]
+    with pytest.raises(GroupedPropagationError) as raised:
+        _run(client, store, owner, parsed_contract=parsed, secrets=base, wave=wave)
+    assert raised.value.kind is GroupedPropagationErrorCode.OWNERSHIP_LOST
+    # The separate-consumer Secret was written (before ownership was lost).
+    assert client.replace_calls == 1
+    # The durable progress write for separate-consumer's group did NOT occur:
+    # ownership was lost before that write.  applied_location_ids is empty.
+    assert store.current.state.current_transaction is not None
+    persisted = store.current.state.current_transaction.propagation.to_b
+    assert persisted.applied_location_ids == ()
+
+
+# 24b. A no-write group where progress is repaired also requires ownership
+# reassertion before the durable state write.
+def test_ownership_reasserted_for_noop_progress_repair() -> None:
+    parsed = contract(_fields_contract_text())
+    base = _fields_secrets()
+    wave, _ = _wave_for(parsed, base)
+    # All Secrets already at target (no writes needed), but the wave has no
+    # applied progress.  The executor repairs the progress for each group via
+    # a no-write outcome.  Ownership is lost after the first group's fresh
+    # read (before the first progress write).
+    all_target = _fields_secrets(
+        one=Identity.BREAKGLASS, two=Identity.BREAKGLASS, three=Identity.BREAKGLASS,
+    )
+    client = _client(all_target)
+    store = MemoryStateStore(_state(wave))
+    owner = Ownership()
+    original_read = client.read
+
+    def read_side_effect(ns: str, name: str):
+        result = original_read(ns, name)
+        # After the separate-consumer's fresh execution read (read #3),
+        # lose ownership before the progress write for that group.
+        if client.read_calls >= 3:
+            owner.fail = True
+        return result
+
+    client.read = read_side_effect  # type: ignore[method-assign]
+    with pytest.raises(GroupedPropagationError) as raised:
+        _run(client, store, owner, parsed_contract=parsed,
+             secrets=all_target, wave=wave)
+    assert raised.value.kind is GroupedPropagationErrorCode.OWNERSHIP_LOST
+    # No Secret writes occurred (all already at target).
+    assert client.replace_calls == 0
+    # The durable progress write did NOT occur: ownership was lost before it.
+    assert store.current.state.current_transaction is not None
+    persisted = store.current.state.current_transaction.propagation.to_b
+    assert persisted.applied_location_ids == ()
+
+
 # 25. credentials are absent from repr/error/state/log-facing objects.
 def test_credentials_absent_from_diagnostics() -> None:
     parsed = contract(_fields_contract_text())
