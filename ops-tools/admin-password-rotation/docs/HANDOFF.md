@@ -2,7 +2,7 @@
 
 ## Current project state
 
-This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slices 4A-4C are complete.
+This directory contains a staged implementation of the Genestack/OpenStack Keystone administrative password-rotation tool. Slices 1-3 are complete through Slice 3E, and Slices 4A-4D are complete.
 
 The project now includes mutation-capable library behavior.
 
@@ -107,13 +107,28 @@ Slice 4C
     durable progress persistence through the existing transaction state
     crash/recovery: no duplicate write on resume, regression fails closed
     retained restart metadata for the later restart-debt slice, no restarts
+
+Slice 4D
+    restart action derivation from durable changed-location accounting
+    deduplication of identical workload targets across locations
+    contract-digest validation against wave intent (CONTRACT_DRIFT fail-closed)
+    stale durable runtime action ID validation (STALE_RUNTIME_ACTIONS fail-closed)
+    direct Kubernetes Deployment/DaemonSet restart via strategic-merge patch on
+    the Pod template (spec.template.metadata.annotations)
+    generation-aware bounded rollout observation and completion verification
+    durable per-action progress (PENDING/RUNNING/COMPLETE) in the wave
+    COMPLETE is a discharged obligation (not re-observed/re-dispatched)
+    ownership: RUNNING write fences ownership, then reasserted immediately
+    before the Kubernetes dispatch
+    crash/recovery: re-observe before dispatch, confirm without re-dispatch,
+    conservative repeated restart over unverified completion
+    deterministic restart-request marker (SHA-256 of wave intent tuple)
 ```
 
-The next intended work is Slice 4D: restart/action executor and restart-debt
-recovery. It consumes Slice 4C's confirmed changed-location accounting and the
-retained restart dependencies to perform the actual workload restarts and
-rollout waiting. Workload actions, phase gates, cutover verification, lockout
-restoration, final completion, and packaging remain later work.
+The next intended work is Slice 4E: compose propagation and restart actions
+into the `SWITCH_TO_B` phase, then implement `VERIFY_B` and the later A-side
+phases. Cutover/service verification, lockout restoration, final transaction
+completion, and packaging remain later work.
 
 The deployment has not yet been cut over between A and B. No implemented runner
 performs `SWITCH_TO_B` or `VERIFY_B`, and production execution must not enter
@@ -124,8 +139,10 @@ converges the core A credential to observed A3. Slice 4A can mutate one already
 classified propagated location. Slice 4B can durably describe and freshly
 reconcile a complete propagation obligation. Slice 4C can safely execute that
 wave with grouped per-Secret writes and changed-location accounting, but it does
-not execute restarts or advance runtime phases. No implemented runner performs
-workload restarts, waits for rollouts, performs runtime/service cutover
+not execute restarts or advance runtime phases. Slice 4D can execute and recover
+the workload restart debt caused by those changes, observing each rollout to
+completion, but it does not compose that into a runtime phase. No implemented
+runner performs `SWITCH_TO_B` / `VERIFY_B`, runtime/service cutover
 verification, restores consumers to admin, executes `SWITCH_TO_A` / `VERIFY_A`,
 restores lockout policy, or completes the transaction.
 
@@ -857,10 +874,11 @@ Use historical files as provenance, not as an instruction to undo completed slic
 
 ## Suggested next-agent task
 
-Build Slice 4D — restart/action executor and restart-debt recovery — on the
-Slice 4C confirmed changed-location accounting and retained restart
-dependencies. It must perform the actual workload restarts and rollout waiting
-derived from locations that changed during the propagation transaction, without
-bypassing `SWITCH_TO_B` / `VERIFY_B`, restoring lockout, or treating A3 as
-transaction completion. Cutover verification, lockout restoration, final
-completion, and packaging remain later work.
+Build Slice 4E — compose the Slice 4C propagation wave and the Slice 4D
+restart/action executor into the `SWITCH_TO_B` phase, and implement `VERIFY_B`.
+`SWITCH_TO_B` runs the grouped propagation wave and then discharges the
+resulting restart debt, succeeding only after every changed location is at the
+target and every owed workload rollout is observed complete. `VERIFY_B` then
+performs the service/runtime cutover verification before the transaction may
+advance to `ROTATE_A`. Lockout restoration, `SWITCH_TO_A`, `VERIFY_A`, final
+transaction completion, and packaging remain later work.

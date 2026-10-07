@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slices 4A-4C are complete.
+Status: Slices 1-3 (through Slice 3E) and Slices 4A-4D are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -18,9 +18,14 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4C are complete.
   crash/recovery: a safe pre-reconciliation pass, one CAS-protected write per
   Secret group, fresh per-location verification, and actual changed-location
   accounting. It does not execute restarts or advance runtime phases.
-- Restart execution, rollout waiting, runtime/service verification, SWITCH_TO_B,
-  VERIFY_B, SWITCH_TO_A, VERIFY_A, lockout restoration, and all later
-  orchestration remain unimplemented.
+- Slice 4D implements the restart/action executor and restart-debt recovery
+  layer: it consumes Slice 4C's durable changed-location accounting, derives
+  deduplicated workload restart actions, dispatches the Kubernetes restart
+  through direct APIs, observes the resulting rollout, persists per-action
+  progress, and recovers outstanding debt after interruption. It does not
+  advance runtime phases.
+- Runtime/service verification, SWITCH_TO_B, VERIFY_B, SWITCH_TO_A, VERIFY_A,
+  lockout restoration, and all later orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
 ## Boundaries
@@ -49,6 +54,7 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4C are complete.
 | `rotate_a.py` | Bounded Slice 3D A0-to-A1 staging and Slice 3E A1-to-A3 core-credential convergence. |
 | `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it; execute a grouped Secret-level propagation wave with crash/recovery and changed-location accounting. |
 | `propagation_wave.py` | Plan complete propagated-location obligations, group them by Secret, and reconcile durable intent against fresh state. |
+| `restart.py` | Derive restart actions from durable changed-location accounting, dispatch the Kubernetes workload restart through direct APIs, observe the rollout to completion, persist per-action progress, and recover outstanding debt after interruption. |
 | `wave_digest.py` | Shared credential-free wave planning primitives (contract digest and membership) used by both planning and grouped execution. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
@@ -731,6 +737,128 @@ consumers are using the new credential.
 Slice 4C does not execute workload restarts, wait for rollouts, discharge restart
 debt, perform `SWITCH_TO_B`/`VERIFY_B`/`SWITCH_TO_A`/`VERIFY_A`, restore lockout,
 or complete the transaction. Those are later slices.
+
+### Implemented Slice 4D — restart/action executor and restart-debt recovery
+
+Slice 4D executes and recovers the restart/action debt caused by Slice 4C's
+confirmed credential propagation. It consumes the wave's durable
+`applied_location_ids` (the changed-location accounting) and the contract's
+restart edges; it does not recompute this distinction from current Secret
+contents. The unit of work is one deduplicated workload restart action:
+
+```text
+derive restart actions from durable changed-location accounting
+    (validating the contract digest against the wave intent)
+    ->
+validate durable runtime action IDs against the derived action set
+    ->
+persist any missing action records (batch, ownership-fenced)
+    ->
+for each outstanding action:
+    re-observe the workload (fresh reality, not progress)
+    ->
+    if the restart marker matches and the rollout is complete: confirm
+    ->
+    else: persist RUNNING (ownership-fenced), reassert ownership,
+          dispatch the restart
+    ->
+    observe the rollout to completion (bounded poll)
+    ->
+    persist COMPLETE (ownership-fenced)
+```
+
+**Restart action derivation.** For each location in the wave's durable changed
+set (`applied_location_ids`), its `restart` list contributes one or more
+workload actions. The contributed targets are unioned and deduplicated, so
+multiple changed locations naming the same workload yield exactly one action.
+An empty `restart` list produces no action. The action ID is a stable,
+schema-valid identifier derived from the workload (`<kind>_<name>`), and the
+action retains its causal location IDs for tests and reporting. No credential
+values are involved.
+
+**Restart request identity.** The restart marker written to the workload Pod
+template is derived deterministically from the wave's immutable intent
+(`restart_request_for`), not from an opaque caller-supplied string. It is a
+compact SHA-256 digest of the full identifying tuple (target identity, target
+generation, contract digest), prefixed with `genestack-`. Every declared input
+contributes to the final marker. It is stable across recovery of the same
+restart wave (the intent is immutable), different between logically separate
+to-B and to-A restart waves, safe to place in a Kubernetes annotation, and
+contains no credential material.
+
+**Direct Kubernetes restart.** The restart is dispatched through the Kubernetes
+Python API (AppsV1), not by shelling out to `kubectl`. The executor sets the
+`kubectl.kubernetes.io/restartedAt` annotation on the target Deployment or
+DaemonSet's Pod template (`spec.template.metadata.annotations`) via a
+strategic-merge patch, then re-reads the workload. A successful patch response
+alone is not completion. The marker is written to and read from the same
+Pod-template location; a top-level workload metadata annotation does not
+trigger a rollout and is not considered the restart marker.
+
+**Rollout observation.** After dispatch the executor polls the workload with a
+small, explicit poll interval and deadline. Rollout completion is
+generation-aware: the workload's `metadata.generation` must have been observed
+by the controller (`status.observedGeneration >= metadata.generation`) before
+the rollout is considered complete, and the observed Pod-template restart
+annotation must equal the expected restart request. A Deployment completes
+when, in addition, every desired replica is updated and ready with none
+unavailable; a DaemonSet completes when every scheduled node has an updated,
+ready replica. A rollout that reports `Failed` (or a
+`ProgressDeadlineExceeded` condition on a Deployment) raises `ROLLOUT_FAILED`;
+a rollout that does not complete within the deadline raises `ROLLOUT_TIMEOUT`.
+The executor considers the action complete only after the required
+rollout/replacement has been observed successfully.
+
+**Durable progress and ownership.** Each action's progress is persisted in the
+existing schema-v2 `PropagationWave.runtime_actions` (PENDING → RUNNING →
+COMPLETE). The ownership sequence around dispatch is:
+
+1. Persist RUNNING (the state-store write fences ownership internally).
+2. Reassert ownership immediately before the external Kubernetes mutation.
+3. Dispatch the restart.
+4. Observe the rollout to completion.
+5. Persist COMPLETE (the state-store write fences ownership internally).
+
+This ensures that a loss of ownership between the RUNNING write and the dispatch
+is detected: the immediately-pre-dispatch assertion fails and no Kubernetes
+mutation occurs. The persisted RUNNING state is acceptable and recoverable.
+
+Before deriving restart actions, the executor validates that the current
+contract's canonical digest matches the wave intent's `contract_digest`. A
+contract that retains the same location IDs while changing restart edges
+produces a different digest and fails closed with `CONTRACT_DRIFT`. The executor
+also validates that every durable runtime action ID belongs to the derived
+action set; an unexpected durable action ID fails closed with
+`STALE_RUNTIME_ACTIONS` rather than remaining unreachable debt.
+
+**Crash/recovery.** On resume the executor re-observes the workload rather than
+trusting the last attempted action:
+
+- a crash before dispatch resumes to the dispatch (the action record is PENDING
+  and the workload has no matching restart annotation);
+- a crash after dispatch but before the completion write resumes to an
+  already-restarted, complete workload: the executor confirms completion
+  without re-dispatching (the restart annotation matches and the rollout is
+  complete);
+- a crash after the rollout is observed complete but before the durable
+  completion write likewise confirms from fresh observation.
+
+**COMPLETE is a discharged obligation.** A durable `RuntimeActionState.COMPLETE`
+record means this transaction's restart obligation was previously observed
+complete (written only after a successful rollout observation with matching
+restart marker and generation convergence). A subsequent execution does not
+re-observe or re-dispatch a COMPLETE action: unrelated workload changes after
+the restart should not resurrect old restart debt. Only PENDING and RUNNING
+actions are re-observed and conservatively re-dispatched if the workload can no
+longer be observed as restarted-and-complete.
+
+The executor never issues credential mutations; restart debt that was not yet
+dispatched remains durable and recoverable. The wave's restart debt is not lost
+merely because the credential locations are already at their target values.
+
+Slice 4D does not perform `SWITCH_TO_B`/`VERIFY_B`/`SWITCH_TO_A`/`VERIFY_A`,
+restore lockout, complete the transaction, or compose propagation and actions
+into a runtime phase. Those are later slices.
 
 ## Security and deployment limits
 

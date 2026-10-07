@@ -1,7 +1,7 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4C are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4D are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass and move the canonical admin credential through
 A0 -> A1 -> A2 -> A3. There is no complete end-to-end rotation command yet.
@@ -12,7 +12,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, and 4C are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, and 4D are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -78,14 +78,36 @@ regressed state fails closed with no write. The Kubernetes Secret is the mutatio
 unit; the logical credential location is the verification/accounting unit; the
 propagation wave is the transaction unit.
 
-There is still no propagation-wave phase runner or restart execution. Slice 4C
-safely executes the grouped per-Secret credential writes and records the actual
-changed-location accounting, but it does not execute workload restarts, wait for
-rollouts, discharge restart debt, perform runtime/service verification, restore all
-consumers to admin, `SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout
-restoration, or final transaction completion. Lockout suppression needed by
-`ROTATE_A` is implemented, but the current Slice 3 path leaves it suppressed with
-restoration still required.
+Slice 4D adds the restart/action executor and restart-debt recovery layer. It
+consumes Slice 4C's durable changed-location accounting, validates the current
+contract's digest against the wave intent, derives and deduplicates the
+workload restart actions owed by the changed locations, and executes each one
+through the Kubernetes API (a strategic-merge patch on the target Deployment or
+DaemonSet's Pod template, setting `spec.template.metadata.annotations` with the
+`kubectl.kubernetes.io/restartedAt` marker). It observes each resulting rollout
+to completion with a bounded poll, requiring generation convergence
+(`observedGeneration >= metadata.generation`) and a matching restart marker. It
+persists per-action progress (PENDING/RUNNING/COMPLETE) in the wave's durable
+state; the RUNNING write fences ownership, and ownership is reasserted
+immediately before the Kubernetes dispatch. A durable COMPLETE is a discharged
+obligation: it was written only after a successful rollout observation and is
+not re-observed or re-dispatched by a subsequent execution. On resume, PENDING
+and RUNNING actions re-observe the workload rather than trusting the last
+attempted action: an already-restarted, complete rollout is confirmed without
+re-dispatch, and an unverifiable restart is conservatively re-dispatched. The
+restart marker is a compact SHA-256 digest of the wave's immutable intent
+tuple, derived deterministically. Unexpected durable runtime action IDs fail
+closed with `STALE_RUNTIME_ACTIONS`. It performs no credential mutation and
+advances no runtime phase.
+
+There is still no propagation-wave phase runner. Slice 4C safely executes the
+grouped per-Secret credential writes and records the actual changed-location
+accounting; Slice 4D executes and recovers the resulting restart debt. Neither
+performs runtime/service verification, restores all consumers to admin,
+`SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration, or
+final transaction completion. Lockout suppression needed by `ROTATE_A` is
+implemented, but the current Slice 3 path leaves it suppressed with restoration
+still required.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
 clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl
