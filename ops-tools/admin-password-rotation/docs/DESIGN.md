@@ -661,25 +661,36 @@ persist changed-location progress
 **Safe pre-reconciliation pass.** Before any write, every group is freshly
 observed: the Secret is GET, its UID is checked against the durable observed UID
 (a same-name replacement fails closed), and every participating logical location
-is parsed and classified against the known credential references. A group may
-safely contain a mixture (for example two admin locations and one breakglass
-location when the target is breakglass) so long as every state is recognized and
-allowed by the persisted intent; only the non-target locations require
-transformation. Unknown credentials, unparseable representations, replaced
-Secrets, a location recorded-complete that is no longer at target (regression),
-and a current identity that contradicts durable intent all fail the wave closed
-with no Secret write. This pass is what guarantees that an unknown or malformed
-member in one group produces no write anywhere in the wave.
+is parsed and classified against the known credential references. This all-wave
+safety pass is a coarse early gate: an unknown, malformed, replaced, or regressed
+location in one group fails the whole wave with no Secret write. Crucially, each
+group is **re-observed freshly immediately before it is processed** — the
+no-op-versus-mutation decision and the CAS precondition both come from that fresh
+snapshot, never from the earlier precheck. This prevents a stale precheck from
+accepting a group that another actor changed between the precheck and execution.
 
-**Grouped composition.** The per-location structural transformations (reusing
-Slice 4A's `mutate_credential_fields()`) are merged by `compose_group_replacements()`
-into one set of Secret data-key replacements. Distinct data keys combine
-independently. When two logical locations modify the same data key (for example
-distinct INI options in one file), the results are composed only when they are
-byte-identical (same declared span); otherwise the group is rejected with
-`GROUP_COMPOSITION_CONFLICT` rather than depending on mutation order, because each
-representation serializer re-serializes the whole document from its own parse and
-a naive second pass would discard the first change.
+**Changed-location accounting.** For each logical location Slice 4C distinguishes
+`ALREADY_CONVERGED` (freshly at target, no write this run) from
+`CHANGED_BY_THIS_PROPAGATION` (required and performed a mutation). Durable
+progress (`applied_location_ids`) advances only for locations that actually
+changed plus locations that were already recorded-complete and remain at target.
+Because a location's durable intent records `expected_target` (whether it was
+already at target when the wave was established), an originally-non-target
+location (`expected_target == False`) that is freshly observed at target during
+recovery but has no applied marker is conservatively treated as a transition that
+occurred during the wave lifetime — our write succeeded immediately before a
+crash, or another actor converged the Secret while the wave was active. Its
+restart debt is retained in either case, because a runtime consumer may still
+require restart. A location that was already target at wave creation
+(`expected_target == True`) is not restart debt merely because it remains target.
+
+**Per-group progress persistence.** Verified propagation progress is persisted
+after each successfully processed Secret group, not only once at the end of the
+full wave. This shrinks the window in which a successful write is not yet backed
+by durable accounting. The unavoidable crash between a successful write and the
+subsequent progress persistence is still handled by the recovery rule above: on
+resume the Secret is already target and the originally-non-target location's
+restart debt is reconstructed from the durable intent.
 
 **One conditional write per group.** Each group that requires mutation issues a
 single JSON Patch guarded by atomic UID and resourceVersion tests, using the

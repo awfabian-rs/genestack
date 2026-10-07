@@ -747,15 +747,23 @@ by the persisted intent; only the non-target locations require transformation.
 Unknown credentials, unparseable representations, replaced Secrets, a
 recorded-complete location that is no longer at target, and a current identity
 that contradicts durable intent fail the whole wave closed with no Secret write.
+This all-wave safety pass is a coarse early gate; each group is then
+**re-observed freshly immediately before it is processed** so the
+no-op-versus-mutation decision and the CAS precondition both come from a fresh
+snapshot rather than the earlier precheck, preventing a stale precheck from
+accepting a group that another actor changed between precheck and execution.
 
 Per-location structural transformations reuse Slice 4A's
-`mutate_credential_fields()` and are merged by `compose_group_replacements()`
-into one set of data-key replacements. Distinct data keys combine independently.
-When two locations modify the same data key, the group is rejected with
-`GROUP_COMPOSITION_CONFLICT` unless their per-location results are byte-identical
-(same declared span), because each representation serializer re-serializes the
-whole document from its own parse and a naive second pass would discard the first
-change.
+`mutate_credential_fields()` and are composed by `compose_group_replacements()`
+on an evolving in-memory Secret. Each location's transformation is derived and
+applied to the running document in deterministic group order, so several logical
+locations that share one Secret data key (for example distinct INI options in
+one file) are all mutated together: every transformation operates on the
+already-updated document, so no change is discarded. One final replacement is
+emitted per data key that actually changed relative to the original Secret.
+Merely sharing a data key is not a conflict; only a genuinely incompatible
+declaration that composition cannot give deterministic safe semantics to is
+rejected.
 
 Each group that needs mutation issues a single JSON Patch guarded by atomic UID
 and resourceVersion tests, using the freshly observed Secret as the CAS
@@ -766,21 +774,32 @@ Secret is freshly reread and every logical location is reparsed and required to
 exactly equal the target credential.
 
 Slice 4C distinguishes `ALREADY_CONVERGED` from `CHANGED_BY_THIS_PROPAGATION`
-per logical location. Durable progress (`applied_location_ids`) advances only for
-locations that actually changed plus locations already recorded-complete and
-still at target. Restart dependencies are retained from the actually-changed
-locations for the later restart-debt slice; Slice 4C performs no restart.
+per logical location. Durable progress (`applied_location_ids`) advances for
+locations that actually changed plus locations that were already recorded-complete
+and remain at target. Because a location's durable intent records
+`expected_target` (whether it was already at target when the wave was
+established), an originally-non-target location (`expected_target == False`)
+freshly observed at target during recovery but with no applied marker is
+conservatively treated as a transition that occurred during the wave lifetime —
+our write succeeded immediately before a crash, or another actor converged the
+Secret while the wave was active. Its restart debt is retained in either case.
+A location already target at wave creation (`expected_target == True`) is not
+restart debt merely because it remains target. Verified progress is persisted
+after each successfully processed group, not only at the end of the wave, so
+changed/restart-debt accounting survives a crash between a write and wave
+completion.
 
 Crash/recovery follows the existing "fresh state is authoritative, progress is a
 hint" model: a crash before the write resumes to the mutation; a crash after the
 write but before progress persistence resumes to an already-converged observation
-with no duplicate write; and progress claiming completion while fresh state
-regressed is treated as unsafe. The wave is credential-converged when fresh
-observation establishes every intended location at the target — this does not
-mean runtime consumers are using the new credential; that requires the later
-restart/action slice. Slice 4C does not execute workload restarts, wait for
-rollouts, discharge restart debt, perform `SWITCH_TO_B`/`VERIFY_B`/
-`SWITCH_TO_A`/`VERIFY_A`, restore lockout, or complete the transaction.
+with no duplicate write, retaining the originally-non-target location's restart
+debt; and progress claiming completion while fresh state regressed is treated as
+unsafe. The wave is credential-converged when fresh observation establishes every
+intended location at the target — this does not mean runtime consumers are using
+the new credential; that requires the later restart/action slice. Slice 4C does
+not execute workload restarts, wait for rollouts, discharge restart debt, perform
+`SWITCH_TO_B`/`VERIFY_B`/`SWITCH_TO_A`/`VERIFY_A`, restore lockout, or complete
+the transaction.
 
 ## Code-change discipline
 

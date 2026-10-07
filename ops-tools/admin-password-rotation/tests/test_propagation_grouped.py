@@ -346,21 +346,34 @@ def test_different_data_keys_compose() -> None:
     assert final.get("PASSWORD_TWO") == BREAKGLASS
 
 
-# 4a. two INI locations in the same file with distinct options cannot be
-# safely composed (each serializer re-serializes the whole document from its
-# own parse, so the second would clobber the first) -> the group is rejected
-# explicitly rather than emitting a wrong document.
-def test_conflicting_same_key_overlap_rejected() -> None:
+# 4a. two INI locations in the same file with distinct options compose: both
+# sections are changed, unrelated content is intact, and exactly one write
+# occurs with one replacement for the shared data key.
+def test_conflicting_same_key_now_composes() -> None:
     parsed = contract(_ini_contract_text())
     base = _ini_secrets()
     wave, _ = _wave_for(parsed, base)
     client = _client(base)
     store = MemoryStateStore(_state(wave))
     owner = Ownership()
-    with pytest.raises(GroupedPropagationError) as raised:
-        _run(client, store, owner, parsed_contract=parsed, secrets=base, wave=wave)
-    assert raised.value.kind is GroupedPropagationErrorCode.GROUP_COMPOSITION_CONFLICT
-    assert client.replace_calls == 0
+    result = _run(client, store, owner, parsed_contract=parsed, secrets=base, wave=wave)
+    ini = next(g for g in result.groups if g.secret_name == "ini-consumer")
+    # Exactly one write for the group.
+    assert ini.secret_writes == 1
+    assert client.replace_calls == 1
+    final = client.current("openstack", "ini-consumer")
+    doc = final.get("service.conf")
+    assert doc is not None
+    text = doc.reveal()
+    # Both sections changed in the single serialized document.
+    assert text.count(b"username = breakglass") == 2
+    assert text.count(b"password = " + BREAKGLASS.reveal()) == 2
+    # Unrelated sections and comments remain intact.
+    assert b"region = DFW" in text
+    assert b"unrelated-db-password" in text
+    assert b"# retained comment" in text
+    # The opaque data key is preserved.
+    assert final.get("opaque") == SecretValue(b"unchanged")
 
 
 # 4b. two INI locations in the same file whose selectors resolve to the SAME
@@ -423,7 +436,10 @@ def test_partial_group_one_write_accounting_only_changed() -> None:
                   secrets=base_fresh, wave=wave)
     shared = next(g for g in result.groups if g.secret_name == "shared-consumers")
     assert shared.secret_writes == 1
-    assert shared.changed_locations == ("shared-two",)
+    # shared-one is at target but was originally non-target (expected_target
+    # False), so conservative accounting retains it as a possible transition.
+    # shared-two was mutated this run.
+    assert set(shared.changed_locations) == {"shared-one", "shared-two"}
 
 
 # 7. all locations already target -> no write.
@@ -440,7 +456,12 @@ def test_all_already_target_no_write() -> None:
     result = _run(client, store, owner, parsed_contract=parsed,
                   secrets=all_target, wave=wave)
     assert result.secret_writes == 0
-    assert result.changed_locations == ()
+    # No writes occurred; each group wrote zero times.
+    for group in result.groups:
+        assert group.secret_writes == 0
+    # Conservative accounting: each group retains its originally-non-target
+    # locations as crash-recovered transitions (see crash/recovery tests).
+    assert set(result.changed_locations) == {"separate", "shared-one", "shared-two"}
 
 
 # 8. unknown member in a group -> no write, fail closed.
@@ -685,9 +706,11 @@ def test_successful_write_requires_fresh_reread() -> None:
     store = MemoryStateStore(_state(wave))
     owner = Ownership()
     result = _run(client, store, owner, parsed_contract=parsed, secrets=base, wave=wave)
-    # For each group that wrote, there was a read (pre) and a read (post).
-    # 2 groups wrote, 0 groups were no-op: total reads = 2 pre + 2 post = 4.
-    assert client.read_calls == 4
+    # Each group is read once in the initial all-wave safety pass and once in
+    # the fresh per-group execution read; groups that write also do a post-write
+    # verification read.  2 groups: 2 (precheck) + 2 (fresh exec) + 2 (post-write
+    # verification for the two groups that wrote) = 6 reads.
+    assert client.read_calls == 6
     assert result.secret_writes == 2
 
 
@@ -757,7 +780,12 @@ def test_crash_after_write_before_progress_no_duplicate_write() -> None:
                   secrets=converged, wave=wave)
     assert result.secret_writes == 0
     assert client.replace_calls == 0
-    assert result.changed_locations == ()
+    # Conservative crash-recovery accounting: originally-non-target locations
+    # are retained as transitions that occurred during the wave lifetime.
+    assert set(result.changed_locations) == {"separate", "shared-one", "shared-two"}
+    assert store.current.state.current_transaction is not None
+    persisted = store.current.state.current_transaction.propagation.to_b
+    assert set(persisted.applied_location_ids) == {"separate", "shared-one", "shared-two"}
 
 
 # 20. progress says complete but fresh state regressed -> progress not trusted.
@@ -956,3 +984,156 @@ def test_admin_wave_converges_to_admin() -> None:
     final = client.current("openstack", "shared-consumers")
     assert final.get("USER_ONE") == SecretValue(b"admin")
     assert final.get("PASSWORD_ONE") == ADMIN
+
+
+# Fix 1 regression: a group that is target during the global precheck but is
+# changed by another actor before its execution must not be accepted from the
+# stale precheck snapshot.  The executor re-observes freshly and either safely
+# reconciles the new recognized state or fails closed.
+def test_stale_precheck_noop_is_reconciled_freshly() -> None:
+    parsed = contract(_single_group_contract_text())
+    # Wave planned from all-admin: shared-one, shared-two expected_target=False.
+    base = _single_group_secrets()
+    wave, _ = _wave_for(parsed, base)
+    # Fresh state at precheck time: both already at breakglass (target).  The
+    # precheck sees no-op.  Before the group executes, an external actor has
+    # changed nothing (still at target) — but the point is the executor must
+    # re-observe, not reuse the precheck.  We assert no write and conservative
+    # accounting (originally non-target locations retained as crash-recovered).
+    at_target = _single_group_secrets(one=Identity.BREAKGLASS, two=Identity.BREAKGLASS)
+    client = _client(at_target)
+    store = MemoryStateStore(_state(wave))
+    owner = Ownership()
+    result = _run(client, store, owner, parsed_contract=parsed,
+                  secrets=at_target, wave=wave)
+    # No write: the fresh observation confirms target.
+    assert result.secret_writes == 0
+    assert client.replace_calls == 0
+    # Conservative accounting: originally-non-target locations retained.
+    assert set(result.changed_locations) == {"shared-one", "shared-two"}
+    # Durable progress repaired to the retained set.
+    assert store.current.state.current_transaction is not None
+    persisted = store.current.state.current_transaction.propagation.to_b
+    assert set(persisted.applied_location_ids) == {"shared-one", "shared-two"}
+
+
+def test_stale_precheck_changed_by_actor_fails_closed() -> None:
+    # A location that is at target during the precheck but, before the fresh
+    # execution read, is changed by an external actor to an identity that
+    # contradicts the durable intent must fail closed.  Read order:
+    # precheck(shared)=1, fresh(shared)=2.  Trigger the contradiction on read #2.
+    parsed = contract(_single_group_contract_text())
+    base = _single_group_secrets()
+    wave, _ = _wave_for(parsed, base)
+    # At precheck: both at breakglass (target).  At fresh read: shared-two's
+    # username changed to something that classifies as a recognized identity
+    # contradicting expected_identity (admin) with expected_target=False.
+    at_target = _single_group_secrets(one=Identity.BREAKGLASS, two=Identity.BREAKGLASS)
+    client = _client(at_target)
+    read_counter = {"n": 0}
+    original_read = client.read
+
+    def staged_read(ns: str, name: str):
+        read_counter["n"] += 1
+        if name == "shared-consumers" and read_counter["n"] >= 2:
+            # Fresh read: change USER_TWO to "admin" while PASSWORD_TWO stays
+            # breakglass.  This classifies as... actually let's make it
+            # PASSWORD_TWO = admin (matches admin reference) with USER_TWO =
+            # breakglass.  classify: username="breakglass" != "admin", so it
+            # checks breakglass: username matches, password=admin != breakglass
+            # reference -> UNKNOWN -> unsafe.
+            return replace(
+                at_target["shared-consumers"],
+                data=tuple(
+                    SecretField(item.key, SecretValue(ADMIN.reveal()))
+                    if item.key == "PASSWORD_TWO" else item
+                    for item in at_target["shared-consumers"].data
+                ),
+            )
+        return original_read(ns, name)
+
+    client.read = staged_read  # type: ignore[method-assign]
+    store = MemoryStateStore(_state(wave))
+    owner = Ownership()
+    with pytest.raises(GroupedPropagationError) as raised:
+        _run(client, store, owner, parsed_contract=parsed,
+             secrets=at_target, wave=wave)
+    assert raised.value.kind is GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE
+    assert client.replace_calls == 0
+
+
+# Fix 2 regression: first group succeeds and persists progress; a later group
+# fails.  The first group's changed/restart accounting is durable and
+# recoverable.
+def test_first_group_progress_survives_later_failure() -> None:
+    parsed = contract(_fields_contract_text())
+    base = _fields_secrets()
+    wave, _ = _wave_for(parsed, base)
+    # Make the shared-consumers group (processed second) fail on its fresh
+    # execution read with an unknown credential, so the wave stops after the
+    # first group.  Read order: precheck(separate)=1, precheck(shared)=2,
+    # fresh(separate)=3, fresh(shared)=4.  Trigger the failure on read #4.
+    client = _client(base)
+    read_counter = {"n": 0}
+    original_read = client.read
+
+    def failing_read(ns: str, name: str):
+        read_counter["n"] += 1
+        if name == "shared-consumers" and read_counter["n"] >= 4:
+            return replace(
+                base["shared-consumers"],
+                data=tuple(
+                    SecretField(item.key, SecretValue(b"unknown-cred"))
+                    if item.key == "PASSWORD_ONE" else item
+                    for item in base["shared-consumers"].data
+                ),
+            )
+        return original_read(ns, name)
+
+    client.read = failing_read  # type: ignore[method-assign]
+    store = MemoryStateStore(_state(wave))
+    owner = Ownership()
+    with pytest.raises(GroupedPropagationError) as raised:
+        _run(client, store, owner, parsed_contract=parsed, secrets=base, wave=wave)
+    assert raised.value.kind is GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE
+    # The first group (separate-consumer) succeeded and its progress is durable.
+    assert store.current.state.current_transaction is not None
+    persisted = store.current.state.current_transaction.propagation.to_b
+    assert "separate" in persisted.applied_location_ids
+
+
+# Fix 2: a location with expected_target=True from wave creation remains no
+# restart debt when simply reconfirmed (still at target, no write).
+def test_expected_target_true_reconfirmed_no_debt() -> None:
+    parsed = contract(_single_group_contract_text())
+    # Plan from a state where shared-one is already at breakglass (target) and
+    # shared-two is at admin (non-target).  Then the wave intent has
+    # shared-one expected_target=True, shared-two expected_target=False.
+    mixed = _single_group_secrets(one=Identity.BREAKGLASS, two=Identity.ADMIN)
+    wave, _ = _wave_for(parsed, mixed)
+    assert wave.intent is not None
+    # Confirm shared-one is expected_target=True in the intent.
+    shared_one_intent = next(
+        loc for g in wave.intent.secret_groups for loc in g.locations
+        if loc.location_id == "shared-one"
+    )
+    assert shared_one_intent.expected_target is True
+    shared_two_intent = next(
+        loc for g in wave.intent.secret_groups for loc in g.locations
+        if loc.location_id == "shared-two"
+    )
+    assert shared_two_intent.expected_target is False
+    # Run with both at target (shared-one reconfirmed, shared-two also
+    # converged).  shared-one (expected_target=True) must not be restart debt.
+    all_target = _single_group_secrets(one=Identity.BREAKGLASS, two=Identity.BREAKGLASS)
+    client = _client(all_target)
+    store = MemoryStateStore(_state(wave))
+    owner = Ownership()
+    result = _run(client, store, owner, parsed_contract=parsed,
+                  secrets=all_target, wave=wave)
+    # shared-two (expected_target=False, freshly at target, no applied marker)
+    # is conservatively retained; shared-one (expected_target=True) is not.
+    assert set(result.changed_locations) == {"shared-two"}
+    assert store.current.state.current_transaction is not None
+    persisted = store.current.state.current_transaction.propagation.to_b
+    assert set(persisted.applied_location_ids) == {"shared-two"}

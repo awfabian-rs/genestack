@@ -58,16 +58,24 @@ complete obligation and require no planned mutation.
 Slice 4C adds grouped Secret-level propagation execution and crash/recovery.
 It consumes the durable Slice 4B wave intent, performs a safe pre-reconciliation
 pass over every Secret group (fresh GET, per-location classification, UID
-continuity check), and only then composes the required transformations and issues
-at most one CAS-protected JSON Patch per Secret group. After each write it
-freshly rereads the Secret and verifies every logical location in the group
-against the target credential. It records which logical locations actually
-changed (distinguishing changed from already-converged), persists that progress
-through the existing transaction state, and retains the resulting restart
+continuity check), and then re-observes each group freshly immediately before it
+is processed so the no-op-versus-mutation decision and the CAS precondition both
+come from a fresh snapshot rather than the earlier precheck. It composes the
+required transformations on an evolving in-memory Secret (reusing Slice 4A's
+structural machinery) and issues at most one CAS-protected JSON Patch per Secret
+group; multiple logical locations sharing one Secret data key are all mutated
+together in deterministic order. After each write it freshly rereads the Secret
+and verifies every logical location in the group against the target credential.
+It records which logical locations actually changed (distinguishing changed from
+already-converged), persists that progress after each successfully processed
+group through the existing transaction state, and retains the resulting restart
 dependencies for the later restart-debt slice without executing any restart.
-Unknown, malformed, replaced, or regressed state fails closed with no write.
-The Kubernetes Secret is the mutation unit; the logical credential location is
-the verification/accounting unit; the propagation wave is the transaction unit.
+An originally-non-target location observed at target during recovery but with no
+applied marker is conservatively treated as a transition that occurred during the
+wave lifetime, retaining its restart debt. Unknown, malformed, replaced, or
+regressed state fails closed with no write. The Kubernetes Secret is the mutation
+unit; the logical credential location is the verification/accounting unit; the
+propagation wave is the transaction unit.
 
 There is still no propagation-wave phase runner or restart execution. Slice 4C
 safely executes the grouped per-Secret credential writes and records the actual

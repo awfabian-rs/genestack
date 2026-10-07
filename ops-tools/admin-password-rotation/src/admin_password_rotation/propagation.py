@@ -18,9 +18,10 @@ from .kubernetes_api import create_kubernetes_api, validate_api_options
 from .model import (
     CredentialContract, CredentialGeneration, CredentialLocation, CredentialState,
     FieldsRepresentation, Identity, IdentityBinding, IniRepresentation,
-    LocationRole, ObservedCredential, PropagationSecretGroupIntent,
-    PropagationState, PropagationWave, ReferenceCredentials, RotationTransaction,
-    SecretField, SecretSnapshot, SecretValue, WorkloadRef,
+    LocationRole, ObservedCredential, PropagationLocationIntent,
+    PropagationSecretGroupIntent, PropagationState, PropagationWave,
+    ReferenceCredentials, RotationTransaction, SecretField, SecretSnapshot,
+    SecretValue, WorkloadRef,
 )
 from .prepare_b import OwnershipGuard
 from .representations import mutate_credential_fields, read_credential
@@ -571,7 +572,6 @@ class GroupedPropagationErrorCode(Enum):
     REPRESENTATION_INVALID = "grouped_propagation_representation_invalid"
     SOURCE_LOCATION = "grouped_propagation_source_location"
     IDENTITY_NOT_ALLOWED = "grouped_propagation_identity_not_allowed"
-    GROUP_COMPOSITION_CONFLICT = "grouped_propagation_group_composition_conflict"
     OWNERSHIP_LOST = "grouped_propagation_ownership_lost"
     CONFLICT = "grouped_propagation_conflict"
     WRITE_AMBIGUOUS = "grouped_propagation_write_ambiguous"
@@ -667,45 +667,38 @@ def compose_group_replacements(
     locations: tuple[CredentialLocation, ...],
     desired: DesiredCredential,
 ) -> tuple[SecretField, ...]:
-    """Merge per-location structural transformations into one set of Secret fields.
+    """Compose per-location structural transformations on an evolving Secret.
 
-    Distinct data keys are independent and simply combined.  When two logical
-    locations in one group modify the *same* data key, a single serialized
-    document is the shared medium and a safe composition would require
-    re-serializing that document with every location's change.  The current
-    representation helpers each re-serialize the whole document from their own
-    independent parse, so composing two such outputs would have the second
-    clobber the first.  Rather than emit a wrong document, the group is rejected
-    as non-composable when two locations claim the same data key with
-    non-equivalent results.
+    Each location's transformation is derived and applied to an in-memory
+    working Secret in deterministic group order.  This lets several logical
+    locations that share one Secret data key (for example distinct INI options
+    in a single serialized document) be mutated together: every transformation
+    operates on the already-updated document, so no change is discarded.  One
+    final replacement is emitted per data key that actually changed relative to
+    the original Secret.  Slice 4A's structural transformation machinery is
+    reused; no INI/YAML mutation logic is duplicated.
     """
-    per_location: dict[CredentialLocation, tuple[SecretField, ...]] = {
-        location: _replacements_for_location(current, location, desired)
-        for location in locations
-    }
-    by_key: dict[str, list[tuple[CredentialLocation, SecretField]]] = {}
-    for location, replacements in per_location.items():
-        for field in replacements:
-            by_key.setdefault(field.key, []).append((location, field))
-
-    composed: dict[str, SecretField] = {}
-    for key, claims in by_key.items():
-        if len(claims) > 1:
-            # Two locations modify the same data key.  Compose only when their
-            # results are identical (e.g. two locations whose selectors resolve
-            # to the same span); otherwise the single serialized document cannot
-            # safely carry both distinct changes.
-            values = {field.value.reveal() for _location, field in claims}
-            if len(values) != 1:
-                raise GroupedPropagationError(
-                    GroupedPropagationErrorCode.GROUP_COMPOSITION_CONFLICT,
-                )
-            composed[key] = claims[0][1]
-        else:
-            composed[key] = claims[0][1]
+    working = current
+    for location in locations:
+        replacements = _replacements_for_location(working, location, desired)
+        if not replacements:
+            continue
+        by_key = {item.key: item for item in working.data}
+        by_key.update({item.key: item for item in replacements})
+        working = replace(
+            working, data=tuple(sorted(by_key.values(), key=lambda item: item.key)),
+        )
+    changed_keys = {item.key for item in working.data if item.value.reveal() != _original_value(current, item.key)}
+    composed = [item for item in working.data if item.key in changed_keys]
     if not composed:
         return ()
-    return tuple(sorted(composed.values(), key=lambda item: item.key))
+    return tuple(sorted(composed, key=lambda item: item.key))
+
+
+def _original_value(secret: SecretSnapshot, key: str) -> bytes:
+    value = secret.get(key)
+    assert value is not None  # keys in working are a superset of original keys
+    return value.reveal()
 
 
 def _replacements_for_location(
@@ -732,37 +725,46 @@ def _replacements_for_location(
         raise GroupedPropagationError(GroupedPropagationErrorCode.REPRESENTATION_INVALID) from None
 
 
-def _reconcile_and_classify_group(
+@dataclass(frozen=True)
+class _ReconciledLocation:
+    location: CredentialLocation
+    intent: PropagationLocationIntent
+    observed_identity: Identity
+    is_target: bool
+    recorded_complete: bool
+    expected_target: bool
+
+
+def _reconcile_group(
     group: PropagationSecretGroupIntent,
     current: SecretSnapshot,
     applied: frozenset[str],
     contract_locations: dict[str, CredentialLocation],
     references: ReferenceCredentials,
     desired: DesiredCredential,
-) -> tuple[list[tuple[CredentialLocation, Identity, bool]], bool]:
-    """Classify every group location against fresh state.
+) -> list[_ReconciledLocation]:
+    """Classify every group location against fresh state, failing closed on unsafe.
 
-    Returns ``(entries, safe)`` where each entry is
-    ``(location, observed_identity, requires_mutation)`` and ``safe`` is False
-    when any location has an unsafe disposition: an unparseable representation,
-    an unknown/unrecognized credential, a recorded-complete location that is no
-    longer at target, or a current identity that contradicts durable intent.
-    The Secret must already have been verified to retain its observed UID by the
-    caller before this is used for mutation planning.
+    Returns one ``_ReconciledLocation`` per group location.  Raises
+    ``GroupedPropagationError`` (UNSAFE_OBSERVED_STATE) on any unsafe disposition:
+    an unparseable representation, an unknown/unrecognized credential, a
+    recorded-complete location that is no longer at target, or a current identity
+    that contradicts durable intent.  The caller verifies UID continuity before
+    calling this.
     """
-    entries: list[tuple[CredentialLocation, Identity, bool]] = []
-    safe = True
+    results: list[_ReconciledLocation] = []
     for location_intent in group.locations:
         location = contract_locations[location_intent.location_id]
         recorded_complete = location.name in applied
         try:
             observed = read_credential(current, location.representation)
         except RepresentationError:
-            safe = False
-            continue
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE) from None
         if credential_matches_desired(location, observed, desired):
-            # Freshly at target: safe regardless of progress hint.
-            entries.append((location, desired.identity, False))
+            results.append(_ReconciledLocation(
+                location, location_intent, desired.identity, True, recorded_complete,
+                location_intent.expected_target,
+            ))
             continue
         state = classify(location, observed, references)
         if state is CredentialState.MATCHES_ADMIN_REFERENCE:
@@ -770,22 +772,42 @@ def _reconcile_and_classify_group(
         elif state is CredentialState.MATCHES_BREAKGLASS_REFERENCE:
             observed_identity = Identity.BREAKGLASS
         else:
-            safe = False
-            continue
-        # Non-target.  Durable progress is a hint, never authority.
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
         if recorded_complete:
             # Progress claims completion but fresh state regressed: unsafe.
-            safe = False
-            continue
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
         if (
             location_intent.expected_target
             or observed_identity is not location_intent.expected_identity
         ):
             # Fresh state contradicts the original classified intent: unsafe.
-            safe = False
-            continue
-        entries.append((location, observed_identity, True))
-    return entries, safe
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+        results.append(_ReconciledLocation(
+            location, location_intent, observed_identity, False, False,
+            location_intent.expected_target,
+        ))
+    return results
+
+
+def _location_changed(
+    reconciled: _ReconciledLocation, applied: frozenset[str],
+) -> bool:
+    """Whether this location should be counted as changed/restart-relevant.
+
+    A location changed when it requires mutation, or when it is freshly at
+    target but was *originally* non-target (``expected_target == False``) and has
+    no applied marker.  The latter conservatively treats an originally-non-target
+    location observed at target during recovery as a transition that occurred
+    during the wave lifetime (our write succeeded before a crash, or another
+    actor converged the Secret), retaining its restart debt.  A location that was
+    already target at wave creation (``expected_target == True``) is not
+    restart-relevant merely because it remains target.
+    """
+    if reconciled.is_target:
+        if reconciled.recorded_complete:
+            return True
+        return not reconciled.expected_target
+    return not reconciled.recorded_complete
 
 
 def execute_grouped_propagation_wave(
@@ -801,12 +823,13 @@ def execute_grouped_propagation_wave(
 ) -> GroupedWaveResult:
     """Safely execute one durable propagation wave.
 
-    The wave's Secret groups are processed sequentially in deterministic order.
-    Each group performs at most one conditional Secret write (CAS-protected by
-    the fresh UID/resourceVersion), freshly verifies every logical location
-    against the target, and records which locations actually changed.  Progress
-    is persisted through the existing state store; no restart or phase action
-    is performed.
+    An initial all-wave safety pass observes every group once (fail closed on
+    any unsafe state).  Each group is then re-observed freshly immediately
+    before it is processed: the no-op-versus-mutation decision and the CAS basis
+    both come from that fresh state, never from the earlier precheck snapshot.
+    Durable progress is persisted after each successfully processed group so
+    changed/restart-debt accounting survives a crash between a write and the end
+    of the wave.  No restart or phase action is performed.
     """
     _assert_grouped_owned(ownership)
     intent = wave.intent
@@ -825,111 +848,132 @@ def execute_grouped_propagation_wave(
     ):
         raise GroupedPropagationError(GroupedPropagationErrorCode.CONTRACT_DRIFT)
     contract_locations = {item.name: item for item in contract.locations}
-    applied = frozenset(wave.applied_location_ids)
-    if not applied <= {
+    initial_applied = frozenset(wave.applied_location_ids)
+    if not initial_applied <= {
         location.location_id
         for group in intent.secret_groups
         for location in group.locations
     }:
         raise GroupedPropagationError(GroupedPropagationErrorCode.INTENT_MISMATCH)
 
-    # Safe pre-reconciliation pass: every group must be observed to be safe
-    # before any write occurs.  This ensures that an unknown, malformed,
-    # replaced, or regressed location in one group fails the whole wave with
-    # no Secret write, matching the fail-closed contract.
-    prechecked: list[
-        tuple[PropagationSecretGroupIntent, SecretSnapshot,
-              list[tuple[CredentialLocation, Identity, bool]]]
-    ] = []
+    # Initial all-wave safety pass: fail closed on any unsafe group before any
+    # write.  This is a coarse early gate; execution re-observes each group.
     for group in intent.secret_groups:
         try:
-            current = client.read(group.namespace, group.secret_name)
+            snapshot = client.read(group.namespace, group.secret_name)
         except CredentialSecretClientError:
             raise GroupedPropagationError(GroupedPropagationErrorCode.KUBERNETES_FAILURE) from None
-        if current.uid != group.observed_uid:
+        if snapshot.uid != group.observed_uid:
             raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
-        entries, safe = _reconcile_and_classify_group(
-            group, current, applied, contract_locations, references, desired,
+        _reconcile_group(
+            group, snapshot, initial_applied, contract_locations, references, desired,
         )
-        if not safe:
-            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
-        prechecked.append((group, current, entries))
 
     results: list[GroupedGroupOutcome] = []
-    changed: list[str] = []
-    restarts: list[WorkloadRef] = []
     total_writes = 0
-    for group, current, entries in prechecked:
-        outcome = _execute_prechecked_group(
+    applied: set[str] = set(wave.applied_location_ids)
+    all_changed: set[str] = set()
+    all_restarts: set[WorkloadRef] = set()
+    current_wave = wave
+    for group in intent.secret_groups:
+        applied_frozen = frozenset(applied)
+        outcome = _execute_group(
             client=client, ownership=ownership, group=group,
-            current=current, entries=entries, desired=desired,
+            contract_locations=contract_locations, references=references,
+            desired=desired, applied=applied_frozen,
         )
         results.append(outcome)
         total_writes += outcome.secret_writes
-        # Durable progress advances only for locations this wave actually
-        # mutated (CHANGED) plus locations that were already recorded-converged
-        # (applied) and remain at target (CONFIRMED).  A location that was
-        # pre-converged but *not* previously applied is outside this wave's
-        # mutation obligation and is not recorded as applied.
-        for location, _identity, mutates in entries:
-            if mutates:
-                if location.name not in changed:
-                    changed.append(location.name)
-                for dep in location.restart:
-                    if dep not in restarts:
-                        restarts.append(dep)
-            elif location.name in applied:
-                if location.name not in changed:
-                    changed.append(location.name)
+        # Durable changed/restart accounting: locations that actually changed,
+        # plus already-converged locations that were originally non-target or
+        # previously applied (crash-safe restart-debt retention).
+        changed_now = set(outcome.changed_locations)
+        applied |= changed_now
+        all_changed |= changed_now
+        all_restarts |= set(outcome.restart_dependencies)
+        current_wave = _persist_group_progress(
+            session, target=desired.identity, wave=current_wave,
+            applied=applied, now=now,
+        )
 
-    restarts_deduped = tuple(sorted(set(restarts), key=lambda item: item.label))
-    updated = replace(wave, applied_location_ids=tuple(sorted(changed)))
-    _assert_grouped_owned(ownership)
-    transaction = _replace_wave_for_target(session.transaction, desired.identity, updated)
-    session.write(replace(transaction, updated_at=now))
     return GroupedWaveResult(
         target_identity=desired.identity,
         groups=tuple(results),
-        changed_locations=tuple(sorted(changed)),
-        restart_dependencies=restarts_deduped,
+        changed_locations=tuple(sorted(all_changed)),
+        restart_dependencies=tuple(sorted(all_restarts, key=lambda item: item.label)),
         secret_writes=total_writes,
-        wave=updated,
+        wave=current_wave,
         persisted=session.persisted,
     )
 
 
-def _execute_prechecked_group(
+def _persist_group_progress(
+    session: GroupedPropagationSession, *, target: Identity,
+    wave: PropagationWave, applied: set[str], now: datetime,
+) -> PropagationWave:
+    """Persist wave progress after one group so accounting survives a crash.
+
+    Returns the updated wave (so the caller can track it across groups) or the
+    original wave when nothing changed.
+    """
+    applied_sorted = tuple(sorted(applied))
+    if applied_sorted == wave.applied_location_ids:
+        return wave
+    updated = replace(wave, applied_location_ids=applied_sorted)
+    transaction = _replace_wave_for_target(session.transaction, target, updated)
+    session.write(replace(transaction, updated_at=now))
+    return updated
+
+
+def _execute_group(
     client: CredentialSecretClient,
     ownership: OwnershipGuard,
     *,
     group: PropagationSecretGroupIntent,
-    current: SecretSnapshot,
-    entries: list[tuple[CredentialLocation, Identity, bool]],
+    contract_locations: dict[str, CredentialLocation],
+    references: ReferenceCredentials,
     desired: DesiredCredential,
+    applied: frozenset[str],
 ) -> GroupedGroupOutcome:
-    """Converge one pre-reconciled Secret group with at most one conditional write."""
-    requires_mutation = [location for location, _identity, mutates in entries if mutates]
-
+    """Converge one Secret group from a fresh observation, at most one write."""
+    # Fresh observation: the no-op/mutation decision and CAS basis both use this.
+    try:
+        current = client.read(group.namespace, group.secret_name)
+    except CredentialSecretClientError:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.KUBERNETES_FAILURE) from None
+    # A same-name replacement of the Secret is never a safe mutation target.
+    if current.uid != group.observed_uid:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+    reconciled = _reconcile_group(
+        group, current, applied, contract_locations, references, desired,
+    )
+    requires_mutation = [
+        item.location for item in reconciled if not item.is_target
+    ]
+    location_identities = tuple(
+        (item.location.name, item.observed_identity) for item in reconciled
+    )
     if not requires_mutation:
-        # Every location is already at target: no write, no restart debt.
+        # Every location is already at target: no write.  Changed accounting
+        # still retains originally-non-target (crash-recovered) locations.
+        changed = tuple(
+            item.location.name for item in reconciled if _location_changed(item, applied)
+        )
+        restarts = tuple(sorted(
+            {dep for item in reconciled if _location_changed(item, applied)
+             for dep in item.location.restart},
+            key=lambda item: item.label,
+        ))
         return GroupedGroupOutcome(
-            namespace=group.namespace,
-            secret_name=group.secret_name,
-            location_identities=tuple(
-                (location.name, identity)
-                for location, identity, _ in entries
-            ),
-            changed_locations=(),
-            restart_dependencies=(),
-            secret_writes=0,
+            namespace=group.namespace, secret_name=group.secret_name,
+            location_identities=location_identities, changed_locations=changed,
+            restart_dependencies=restarts, secret_writes=0,
         )
 
-    per_location: list[CredentialLocation] = list(requires_mutation)
-    combined = compose_group_replacements(current, tuple(per_location), desired)
+    combined = compose_group_replacements(current, tuple(requires_mutation), desired)
     if not combined:
         # No structural change needed even though classification said mutation:
-        # this is a contradiction (e.g. credential matches target but was not
-        # classified as target).  Fail closed.
+        # a contradiction.  Fail closed.
         raise GroupedPropagationError(
             GroupedPropagationErrorCode.REQUIRES_MUTATION_AFTER_COMPLETION,
         )
@@ -955,33 +999,26 @@ def _execute_prechecked_group(
         raise GroupedPropagationError(
             GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
         )
-    for location in [loc for loc, _ident, _mut in entries]:
+    for item in reconciled:
         try:
-            observed = read_credential(verified, location.representation)
+            observed = read_credential(verified, item.location.representation)
         except RepresentationError:
             raise GroupedPropagationError(
                 GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
             ) from None
-        if not credential_matches_desired(location, observed, desired):
+        if not credential_matches_desired(item.location, observed, desired):
             raise GroupedPropagationError(
                 GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
             )
 
-    changed_locations = tuple(location.name for location in requires_mutation)
-    restart_deps = tuple(
-        sorted(
-            {dep for location in requires_mutation for dep in location.restart},
-            key=lambda item: item.label,
-        )
-    )
+    changed = tuple(item.location.name for item in reconciled if _location_changed(item, applied))
+    restarts = tuple(sorted(
+        {dep for item in reconciled if _location_changed(item, applied)
+         for dep in item.location.restart},
+        key=lambda item: item.label,
+    ))
     return GroupedGroupOutcome(
-        namespace=group.namespace,
-        secret_name=group.secret_name,
-        location_identities=tuple(
-            (location.name, identity)
-            for location, identity, _ in entries
-        ),
-        changed_locations=changed_locations,
-        restart_dependencies=restart_deps,
-        secret_writes=1,
+        namespace=group.namespace, secret_name=group.secret_name,
+        location_identities=location_identities, changed_locations=changed,
+        restart_dependencies=restarts, secret_writes=1,
     )
