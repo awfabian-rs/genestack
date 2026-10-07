@@ -6,6 +6,7 @@ import hmac
 import json
 import math
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Protocol, Self, cast, runtime_checkable
@@ -15,12 +16,19 @@ from .errors import ReadError, RepresentationError, SafeError
 from .kubernetes import parse_inventory
 from .kubernetes_api import create_kubernetes_api, validate_api_options
 from .model import (
-    CredentialLocation, CredentialState, FieldsRepresentation, Identity,
-    IdentityBinding, IniRepresentation, LocationRole, ReferenceCredentials,
-    ObservedCredential, SecretField, SecretSnapshot, SecretValue, WorkloadRef,
+    CredentialContract, CredentialGeneration, CredentialLocation, CredentialState,
+    FieldsRepresentation, Identity, IdentityBinding, IniRepresentation,
+    LocationRole, ObservedCredential, PropagationLocationIntent,
+    PropagationSecretGroupIntent, PropagationState, PropagationWave,
+    ReferenceCredentials, RotationTransaction, SecretField, SecretSnapshot,
+    SecretValue, WorkloadRef,
 )
 from .prepare_b import OwnershipGuard
 from .representations import mutate_credential_fields, read_credential
+from .state_store import PersistedState, StateStore
+from .wave_digest import (
+    contract_membership, intent_membership, propagation_contract_digest,
+)
 
 
 class CredentialMutationErrorCode(Enum):
@@ -441,10 +449,20 @@ def mutate_credential_location(
 
 
 class FakeCredentialSecretClient:
-    """Behavioral fake with the same conditional and preservation semantics."""
+    """Behavioral fake with the same conditional and preservation semantics.
 
-    def __init__(self, snapshot: SecretSnapshot) -> None:
-        self.snapshot = snapshot
+    Accepts one or more named Secrets. ``snapshot`` (when set) aliases the
+    first-known Secret for compatibility with single-Secret tests; ``secrets``
+    exposes the full per-name mapping for grouped-wave tests.
+    """
+
+    def __init__(self, *snapshots: SecretSnapshot) -> None:
+        if not snapshots:
+            raise ValueError("At least one SecretSnapshot is required.")
+        self.secrets: dict[tuple[str, str], SecretSnapshot] = {
+            (item.namespace, item.name): item for item in snapshots
+        }
+        self.snapshot: SecretSnapshot = next(iter(self.secrets.values()))
         self.read_error: CredentialSecretClientErrorCode | None = None
         self.next_replace_error: CredentialSecretClientErrorCode | None = None
         self.before_replace: Callable[[FakeCredentialSecretClient], None] | None = None
@@ -452,13 +470,43 @@ class FakeCredentialSecretClient:
         self.read_calls = 0
         self.replace_calls = 0
 
+    def current(self, namespace: str, name: str) -> SecretSnapshot:
+        """Return the current snapshot for a named Secret (multi-Secret access)."""
+        key = (namespace, name)
+        if key not in self.secrets:
+            raise CredentialSecretClientError(CredentialSecretClientErrorCode.NOT_FOUND)
+        return self.secrets[key]
+
+    def set_secret(self, snapshot: SecretSnapshot) -> None:
+        """Swap a Secret by its name, keeping other per-name entries intact.
+
+        If the new snapshot names the same Secret as ``self.snapshot``,
+        ``self.snapshot`` is updated to keep the primary reference in sync so
+        that single-Secret tests which read ``client.snapshot`` after a
+        ``before_replace`` callback see the current state.
+        """
+        self.secrets[(snapshot.namespace, snapshot.name)] = snapshot
+        if (
+            self.snapshot.namespace, self.snapshot.name
+        ) == (snapshot.namespace, snapshot.name):
+            self.snapshot = snapshot
+
+    def replace_snapshot(self, snapshot: SecretSnapshot) -> None:
+        """Replace the primary snapshot, syncing the per-name store."""
+        self.snapshot = snapshot
+        self.secrets[(snapshot.namespace, snapshot.name)] = snapshot
+
+    def _current(self, namespace: str, name: str) -> SecretSnapshot:
+        key = (namespace, name)
+        if key not in self.secrets:
+            raise CredentialSecretClientError(CredentialSecretClientErrorCode.NOT_FOUND)
+        return self.secrets[key]
+
     def read(self, namespace: str, name: str) -> SecretSnapshot:
         self.read_calls += 1
         if self.read_error is not None:
             raise CredentialSecretClientError(self.read_error)
-        if self.snapshot.namespace != namespace or self.snapshot.name != name:
-            raise CredentialSecretClientError(CredentialSecretClientErrorCode.NOT_FOUND)
-        return self.snapshot
+        return self._current(namespace, name)
 
     def conditional_replace(
         self, expected: SecretSnapshot, replacements: tuple[SecretField, ...],
@@ -472,24 +520,513 @@ class FakeCredentialSecretClient:
             kind = self.next_replace_error
             self.next_replace_error = None
             raise CredentialSecretClientError(kind)
+        # Resolve the current snapshot for the named Secret.  After a
+        # ``before_replace`` callback that mutated ``self.snapshot`` (the
+        # single-Secret primary reference), the per-name store is re-synced so
+        # the CAS precondition and write target reflect the callback's reality.
         if (
-            self.snapshot.uid != expected.uid
-            or self.snapshot.resource_version != expected.resource_version
+            (self.snapshot.namespace, self.snapshot.name)
+            == (expected.namespace, expected.name)
+        ):
+            self.secrets[(expected.namespace, expected.name)] = self.snapshot
+        current = self._current(expected.namespace, expected.name)
+        if (
+            current.uid != expected.uid
+            or current.resource_version != expected.resource_version
         ):
             raise CredentialSecretClientError(
                 CredentialSecretClientErrorCode.CONDITIONAL_REJECTED,
             )
-        by_key = {item.key: item for item in self.snapshot.data}
+        by_key = {item.key: item for item in current.data}
         by_key.update({item.key: item for item in replacements})
         try:
-            resource_version = str(int(self.snapshot.resource_version) + 1)
+            resource_version = str(int(current.resource_version) + 1)
         except ValueError:
-            resource_version = f"{self.snapshot.resource_version}-next"
-        self.snapshot = replace(
-            self.snapshot, resource_version=resource_version,
+            resource_version = f"{current.resource_version}-next"
+        updated = replace(
+            current, resource_version=resource_version,
             data=tuple(sorted(by_key.values(), key=lambda item: item.key)),
         )
+        self.replace_snapshot(updated)
         if self.after_replace is not None:
             callback = self.after_replace
             self.after_replace = None
             callback(self)
+            # Propagate an after_replace tamper of the primary snapshot to the
+            # per-name store so a fresh read reflects the observed reality.
+            if (
+                (self.snapshot.namespace, self.snapshot.name)
+                == (updated.namespace, updated.name)
+            ):
+                self.secrets[(updated.namespace, updated.name)] = self.snapshot
+
+
+class GroupedPropagationErrorCode(Enum):
+    CONTRACT_DRIFT = "grouped_propagation_contract_drift"
+    INTENT_MISMATCH = "grouped_propagation_intent_mismatch"
+    UNSAFE_OBSERVED_STATE = "grouped_propagation_unsafe_observed_state"
+    REQUIRES_MUTATION_AFTER_COMPLETION = (
+        "grouped_propagation_requires_mutation_after_completion"
+    )
+    NO_CONVERGED_GROUP = "grouped_propagation_no_converged_group"
+    REPRESENTATION_INVALID = "grouped_propagation_representation_invalid"
+    SOURCE_LOCATION = "grouped_propagation_source_location"
+    IDENTITY_NOT_ALLOWED = "grouped_propagation_identity_not_allowed"
+    OWNERSHIP_LOST = "grouped_propagation_ownership_lost"
+    CONFLICT = "grouped_propagation_conflict"
+    WRITE_AMBIGUOUS = "grouped_propagation_write_ambiguous"
+    KUBERNETES_FAILURE = "grouped_propagation_kubernetes_failure"
+    POST_WRITE_VERIFICATION_FAILED = (
+        "grouped_propagation_post_write_verification_failed"
+    )
+    WRITE_WITHOUT_MUTATION_REQUIRED = "grouped_propagation_write_without_mutation_required"
+    PROGRESS_PERSISTENCE_FAILED = "grouped_propagation_progress_persistence_failed"
+
+
+_GROUPED_ERROR_MESSAGES: dict[GroupedPropagationErrorCode, str] = {
+    kind: "Grouped propagation cannot continue safely; inspect the recorded error category."
+    for kind in GroupedPropagationErrorCode
+}
+
+
+class GroupedPropagationError(SafeError):
+    """A credential-free grouped-propagation failure with a stable category."""
+
+    def __init__(self, kind: GroupedPropagationErrorCode) -> None:
+        self.kind = kind
+        super().__init__(kind.value, _GROUPED_ERROR_MESSAGES[kind])
+
+
+class GroupedPropagationSession:
+    """Mutable session over the state store during grouped wave execution."""
+
+    def __init__(self, store: StateStore, persisted: PersistedState) -> None:
+        self.store = store
+        self.persisted = persisted
+
+    @property
+    def transaction(self) -> RotationTransaction:
+        result = self.persisted.state.current_transaction
+        if result is None:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.INTENT_MISMATCH)
+        return result
+
+    def write(self, transaction: RotationTransaction) -> RotationTransaction:
+        self.persisted = self.store.update(
+            self.persisted.revision,
+            replace(self.persisted.state, current_transaction=transaction),
+        )
+        return self.transaction
+
+
+def _assert_grouped_owned(ownership: OwnershipGuard) -> None:
+    try:
+        ownership.assert_owned()
+    except SafeError:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.OWNERSHIP_LOST) from None
+
+
+def _replace_wave_for_target(
+    transaction: RotationTransaction, target: Identity, wave: PropagationWave,
+) -> RotationTransaction:
+    propagation: PropagationState
+    if target is Identity.BREAKGLASS:
+        propagation = replace(transaction.propagation, to_b=wave)
+    else:
+        propagation = replace(transaction.propagation, to_a=wave)
+    return replace(transaction, propagation=propagation)
+
+
+@dataclass(frozen=True)
+class GroupedGroupOutcome:
+    """Per-Secret-group outcome: one write (if any), one verified Secret."""
+
+    namespace: str
+    secret_name: str
+    location_identities: tuple[tuple[str, Identity], ...]
+    changed_locations: tuple[str, ...]
+    restart_dependencies: tuple[WorkloadRef, ...]
+    secret_writes: int
+
+
+@dataclass(frozen=True, repr=False)
+class GroupedWaveResult:
+    """Result of one grouped propagation-wave execution."""
+
+    target_identity: Identity
+    groups: tuple[GroupedGroupOutcome, ...]
+    changed_locations: tuple[str, ...]
+    restart_dependencies: tuple[WorkloadRef, ...]
+    secret_writes: int
+    wave: PropagationWave
+    persisted: PersistedState
+
+
+def compose_group_replacements(
+    current: SecretSnapshot,
+    locations: tuple[CredentialLocation, ...],
+    desired: DesiredCredential,
+) -> tuple[SecretField, ...]:
+    """Compose per-location structural transformations on an evolving Secret.
+
+    Each location's transformation is derived and applied to an in-memory
+    working Secret in deterministic group order.  This lets several logical
+    locations that share one Secret data key (for example distinct INI options
+    in a single serialized document) be mutated together: every transformation
+    operates on the already-updated document, so no change is discarded.  One
+    final replacement is emitted per data key that actually changed relative to
+    the original Secret.  Slice 4A's structural transformation machinery is
+    reused; no INI/YAML mutation logic is duplicated.
+    """
+    working = current
+    for location in locations:
+        replacements = _replacements_for_location(working, location, desired)
+        if not replacements:
+            continue
+        by_key = {item.key: item for item in working.data}
+        by_key.update({item.key: item for item in replacements})
+        working = replace(
+            working, data=tuple(sorted(by_key.values(), key=lambda item: item.key)),
+        )
+    changed_keys = {item.key for item in working.data if item.value.reveal() != _original_value(current, item.key)}
+    composed = [item for item in working.data if item.key in changed_keys]
+    if not composed:
+        return ()
+    return tuple(sorted(composed, key=lambda item: item.key))
+
+
+def _original_value(secret: SecretSnapshot, key: str) -> bytes:
+    value = secret.get(key)
+    assert value is not None  # keys in working are a superset of original keys
+    return value.reveal()
+
+
+def _replacements_for_location(
+    current: SecretSnapshot,
+    location: CredentialLocation,
+    desired: DesiredCredential,
+) -> tuple[SecretField, ...]:
+    """Structural transformation of one logical location, or ``()`` for no-op."""
+    if location.role is not LocationRole.PROPAGATED:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.SOURCE_LOCATION)
+    if not (
+        location.identity is IdentityBinding.ACTIVE
+        or location.identity.value == desired.identity.value
+    ):
+        raise GroupedPropagationError(GroupedPropagationErrorCode.IDENTITY_NOT_ALLOWED)
+    try:
+        if credential_matches_desired(location, read_credential(current, location.representation), desired):
+            return ()
+        return mutate_credential_fields(
+            current, location.representation,
+            username=desired.identity.value, password=desired.password,
+        )
+    except RepresentationError:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.REPRESENTATION_INVALID) from None
+
+
+@dataclass(frozen=True)
+class _ReconciledLocation:
+    location: CredentialLocation
+    intent: PropagationLocationIntent
+    observed_identity: Identity
+    is_target: bool
+    recorded_complete: bool
+    expected_target: bool
+
+
+def _reconcile_group(
+    group: PropagationSecretGroupIntent,
+    current: SecretSnapshot,
+    applied: frozenset[str],
+    contract_locations: dict[str, CredentialLocation],
+    references: ReferenceCredentials,
+    desired: DesiredCredential,
+) -> list[_ReconciledLocation]:
+    """Classify every group location against fresh state, failing closed on unsafe.
+
+    Returns one ``_ReconciledLocation`` per group location.  Raises
+    ``GroupedPropagationError`` (UNSAFE_OBSERVED_STATE) on any unsafe disposition:
+    an unparseable representation, an unknown/unrecognized credential, a
+    recorded-complete location that is no longer at target, or a current identity
+    that contradicts durable intent.  The caller verifies UID continuity before
+    calling this.
+    """
+    results: list[_ReconciledLocation] = []
+    for location_intent in group.locations:
+        location = contract_locations[location_intent.location_id]
+        recorded_complete = location.name in applied
+        try:
+            observed = read_credential(current, location.representation)
+        except RepresentationError:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE) from None
+        if credential_matches_desired(location, observed, desired):
+            results.append(_ReconciledLocation(
+                location, location_intent, desired.identity, True, recorded_complete,
+                location_intent.expected_target,
+            ))
+            continue
+        state = classify(location, observed, references)
+        if state is CredentialState.MATCHES_ADMIN_REFERENCE:
+            observed_identity = Identity.ADMIN
+        elif state is CredentialState.MATCHES_BREAKGLASS_REFERENCE:
+            observed_identity = Identity.BREAKGLASS
+        else:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+        if recorded_complete:
+            # Progress claims completion but fresh state regressed: unsafe.
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+        if (
+            location_intent.expected_target
+            or observed_identity is not location_intent.expected_identity
+        ):
+            # Fresh state contradicts the original classified intent: unsafe.
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+        results.append(_ReconciledLocation(
+            location, location_intent, observed_identity, False, False,
+            location_intent.expected_target,
+        ))
+    return results
+
+
+def _location_changed(
+    reconciled: _ReconciledLocation, applied: frozenset[str],
+) -> bool:
+    """Whether this location should be counted as changed/restart-relevant.
+
+    A location changed when it requires mutation, or when it is freshly at
+    target but was *originally* non-target (``expected_target == False``) and has
+    no applied marker.  The latter conservatively treats an originally-non-target
+    location observed at target during recovery as a transition that occurred
+    during the wave lifetime (our write succeeded before a crash, or another
+    actor converged the Secret), retaining its restart debt.  A location that was
+    already target at wave creation (``expected_target == True``) is not
+    restart-relevant merely because it remains target.
+    """
+    if reconciled.is_target:
+        if reconciled.recorded_complete:
+            return True
+        return not reconciled.expected_target
+    return not reconciled.recorded_complete
+
+
+def execute_grouped_propagation_wave(
+    client: CredentialSecretClient,
+    session: GroupedPropagationSession,
+    ownership: OwnershipGuard,
+    *,
+    contract: CredentialContract,
+    references: ReferenceCredentials,
+    desired: DesiredCredential,
+    wave: PropagationWave,
+    now: datetime,
+) -> GroupedWaveResult:
+    """Safely execute one durable propagation wave.
+
+    An initial all-wave safety pass observes every group once (fail closed on
+    any unsafe state).  Each group is then re-observed freshly immediately
+    before it is processed: the no-op-versus-mutation decision and the CAS basis
+    both come from that fresh state, never from the earlier precheck snapshot.
+    Durable progress is persisted after each successfully processed group so
+    changed/restart-debt accounting survives a crash between a write and the end
+    of the wave.  No restart or phase action is performed.
+    """
+    _assert_grouped_owned(ownership)
+    intent = wave.intent
+    if intent is None:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.INTENT_MISMATCH)
+    if (
+        intent.target_identity is not desired.identity
+        or intent.target_generation
+        != CredentialGeneration.from_secret(desired.password)
+    ):
+        raise GroupedPropagationError(GroupedPropagationErrorCode.INTENT_MISMATCH)
+    if (
+        intent.contract_digest != propagation_contract_digest(contract)
+        or intent_membership(intent)
+        != contract_membership(contract, desired.identity)
+    ):
+        raise GroupedPropagationError(GroupedPropagationErrorCode.CONTRACT_DRIFT)
+    contract_locations = {item.name: item for item in contract.locations}
+    initial_applied = frozenset(wave.applied_location_ids)
+    if not initial_applied <= {
+        location.location_id
+        for group in intent.secret_groups
+        for location in group.locations
+    }:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.INTENT_MISMATCH)
+
+    # Initial all-wave safety pass: fail closed on any unsafe group before any
+    # write.  This is a coarse early gate; execution re-observes each group.
+    for group in intent.secret_groups:
+        try:
+            snapshot = client.read(group.namespace, group.secret_name)
+        except CredentialSecretClientError:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.KUBERNETES_FAILURE) from None
+        if snapshot.uid != group.observed_uid:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+        _reconcile_group(
+            group, snapshot, initial_applied, contract_locations, references, desired,
+        )
+
+    results: list[GroupedGroupOutcome] = []
+    total_writes = 0
+    applied: set[str] = set(wave.applied_location_ids)
+    all_changed: set[str] = set()
+    all_restarts: set[WorkloadRef] = set()
+    current_wave = wave
+    for group in intent.secret_groups:
+        applied_frozen = frozenset(applied)
+        outcome = _execute_group(
+            client=client, ownership=ownership, group=group,
+            contract_locations=contract_locations, references=references,
+            desired=desired, applied=applied_frozen,
+        )
+        results.append(outcome)
+        total_writes += outcome.secret_writes
+        # Durable changed/restart accounting: locations that actually changed,
+        # plus already-converged locations that were originally non-target or
+        # previously applied (crash-safe restart-debt retention).
+        changed_now = set(outcome.changed_locations)
+        applied |= changed_now
+        all_changed |= changed_now
+        all_restarts |= set(outcome.restart_dependencies)
+        current_wave = _persist_group_progress(
+            session, ownership=ownership, target=desired.identity,
+            wave=current_wave, applied=applied, now=now,
+        )
+
+    return GroupedWaveResult(
+        target_identity=desired.identity,
+        groups=tuple(results),
+        changed_locations=tuple(sorted(all_changed)),
+        restart_dependencies=tuple(sorted(all_restarts, key=lambda item: item.label)),
+        secret_writes=total_writes,
+        wave=current_wave,
+        persisted=session.persisted,
+    )
+
+
+def _persist_group_progress(
+    session: GroupedPropagationSession, *, ownership: OwnershipGuard,
+    target: Identity, wave: PropagationWave, applied: set[str],
+    now: datetime,
+) -> PropagationWave:
+    """Persist wave progress after one group so accounting survives a crash.
+
+    Reasserts execution ownership immediately before the durable write: the
+    state-store update is itself a mutation and must obey the same Lease/ownership
+    discipline as Secret writes.  If ownership is lost, raises ``OWNERSHIP_LOST``
+    and does not update transaction state.  When there is no state change to
+    write, no ownership assertion is performed.
+
+    Returns the updated wave (so the caller can track it across groups) or the
+    original wave when nothing changed.
+    """
+    applied_sorted = tuple(sorted(applied))
+    if applied_sorted == wave.applied_location_ids:
+        return wave
+    updated = replace(wave, applied_location_ids=applied_sorted)
+    transaction = _replace_wave_for_target(session.transaction, target, updated)
+    _assert_grouped_owned(ownership)
+    session.write(replace(transaction, updated_at=now))
+    return updated
+
+
+def _execute_group(
+    client: CredentialSecretClient,
+    ownership: OwnershipGuard,
+    *,
+    group: PropagationSecretGroupIntent,
+    contract_locations: dict[str, CredentialLocation],
+    references: ReferenceCredentials,
+    desired: DesiredCredential,
+    applied: frozenset[str],
+) -> GroupedGroupOutcome:
+    """Converge one Secret group from a fresh observation, at most one write."""
+    # Fresh observation: the no-op/mutation decision and CAS basis both use this.
+    try:
+        current = client.read(group.namespace, group.secret_name)
+    except CredentialSecretClientError:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.KUBERNETES_FAILURE) from None
+    # A same-name replacement of the Secret is never a safe mutation target.
+    if current.uid != group.observed_uid:
+        raise GroupedPropagationError(GroupedPropagationErrorCode.UNSAFE_OBSERVED_STATE)
+    reconciled = _reconcile_group(
+        group, current, applied, contract_locations, references, desired,
+    )
+    requires_mutation = [
+        item.location for item in reconciled if not item.is_target
+    ]
+    location_identities = tuple(
+        (item.location.name, item.observed_identity) for item in reconciled
+    )
+    if not requires_mutation:
+        # Every location is already at target: no write.  Changed accounting
+        # still retains originally-non-target (crash-recovered) locations.
+        changed = tuple(
+            item.location.name for item in reconciled if _location_changed(item, applied)
+        )
+        restarts = tuple(sorted(
+            {dep for item in reconciled if _location_changed(item, applied)
+             for dep in item.location.restart},
+            key=lambda item: item.label,
+        ))
+        return GroupedGroupOutcome(
+            namespace=group.namespace, secret_name=group.secret_name,
+            location_identities=location_identities, changed_locations=changed,
+            restart_dependencies=restarts, secret_writes=0,
+        )
+
+    combined = compose_group_replacements(current, tuple(requires_mutation), desired)
+    if not combined:
+        # No structural change needed even though classification said mutation:
+        # a contradiction.  Fail closed.
+        raise GroupedPropagationError(
+            GroupedPropagationErrorCode.REQUIRES_MUTATION_AFTER_COMPLETION,
+        )
+
+    _assert_grouped_owned(ownership)
+    try:
+        client.conditional_replace(current, combined)
+    except CredentialSecretClientError as exc:
+        if exc.kind is CredentialSecretClientErrorCode.CONDITIONAL_REJECTED:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.CONFLICT) from None
+        if exc.kind is CredentialSecretClientErrorCode.OUTCOME_AMBIGUOUS:
+            raise GroupedPropagationError(GroupedPropagationErrorCode.WRITE_AMBIGUOUS) from None
+        raise GroupedPropagationError(GroupedPropagationErrorCode.KUBERNETES_FAILURE) from None
+
+    # Fresh reread and per-location verification.
+    try:
+        verified = client.read(group.namespace, group.secret_name)
+    except CredentialSecretClientError:
+        raise GroupedPropagationError(
+            GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
+        ) from None
+    if verified.uid != group.observed_uid:
+        raise GroupedPropagationError(
+            GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
+        )
+    for item in reconciled:
+        try:
+            observed = read_credential(verified, item.location.representation)
+        except RepresentationError:
+            raise GroupedPropagationError(
+                GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
+            ) from None
+        if not credential_matches_desired(item.location, observed, desired):
+            raise GroupedPropagationError(
+                GroupedPropagationErrorCode.POST_WRITE_VERIFICATION_FAILED,
+            )
+
+    changed = tuple(item.location.name for item in reconciled if _location_changed(item, applied))
+    restarts = tuple(sorted(
+        {dep for item in reconciled if _location_changed(item, applied)
+         for dep in item.location.restart},
+        key=lambda item: item.label,
+    ))
+    return GroupedGroupOutcome(
+        namespace=group.namespace, secret_name=group.secret_name,
+        location_identities=location_identities, changed_locations=changed,
+        restart_dependencies=restarts, secret_writes=1,
+    )

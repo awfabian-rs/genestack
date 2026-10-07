@@ -6,8 +6,6 @@ the existing ownership and transaction-state boundaries.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -16,16 +14,26 @@ from .discovery import classify
 from .errors import RepresentationError, SafeError
 from .model import (
     ConfigurationDigest, CredentialContract, CredentialGeneration,
-    CredentialLocation, CredentialState, FieldsRepresentation, Identity,
-    IdentityBinding, IniRepresentation, LocationRole, PersistentState,
-    PropagationLocationIntent, PropagationSecretGroupIntent, PropagationState,
-    PropagationWave, PropagationWaveIntent, ReferenceCredentials,
+    CredentialLocation, CredentialState, Identity, IdentityBinding, LocationRole,
+    PersistentState, PropagationLocationIntent, PropagationSecretGroupIntent,
+    PropagationState, PropagationWave, PropagationWaveIntent, ReferenceCredentials,
     RotationTransaction, SecretInventory, SecretSnapshot, WorkloadRef,
 )
 from .prepare_b import OwnershipGuard
 from .propagation import DesiredCredential, credential_matches_desired
 from .representations import read_credential
 from .state_store import PersistedState, StateStore
+from .wave_digest import (
+    contract_membership, intent_membership, propagation_contract_digest,
+)
+
+
+def _applicable(location: CredentialLocation, target: Identity) -> bool:
+    if location.role is not LocationRole.PROPAGATED:
+        return False
+    if target is Identity.BREAKGLASS:
+        return location.identity is IdentityBinding.ACTIVE
+    return location.identity in (IdentityBinding.ACTIVE, IdentityBinding.ADMIN)
 
 
 class PropagationWaveErrorCode(Enum):
@@ -212,66 +220,6 @@ class PropagationWavePlanningResult:
     intent_created: bool
 
 
-def _representation_document(location: CredentialLocation) -> dict[str, object]:
-    representation = location.representation
-    if isinstance(representation, FieldsRepresentation):
-        return {
-            "type": "fields", "password": representation.password,
-            "username": representation.username,
-        }
-    if isinstance(representation, IniRepresentation):
-        return {
-            "type": "ini", "key": representation.key,
-            "section": representation.section, "password": representation.password,
-            "username": representation.username,
-        }
-    return {
-        "type": "yaml", "key": representation.key,
-        "password_path": list(representation.password_path),
-        "username_path": (
-            None if representation.username_path is None
-            else list(representation.username_path)
-        ),
-        "document_path": (
-            None if representation.document_path is None
-            else list(representation.document_path)
-        ),
-    }
-
-
-def propagation_contract_digest(contract: CredentialContract) -> ConfigurationDigest:
-    """Fingerprint exact validated contract semantics without credential values."""
-    document = {
-        "namespace": contract.namespace,
-        "locations": [
-            {
-                "name": location.name,
-                "secret": location.secret,
-                "identity": location.identity.value,
-                "role": location.role.value,
-                "representation": _representation_document(location),
-                "restart": [
-                    item.label
-                    for item in _canonical_restart_dependencies(location.restart)
-                ],
-            }
-            for location in sorted(contract.locations, key=lambda item: item.name)
-        ],
-    }
-    encoded = json.dumps(
-        document, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-    ).encode("utf-8")
-    return ConfigurationDigest(f"sha256:{hashlib.sha256(encoded).hexdigest()}")
-
-
-def _applicable(location: CredentialLocation, target: Identity) -> bool:
-    if location.role is not LocationRole.PROPAGATED:
-        return False
-    if target is Identity.BREAKGLASS:
-        return location.identity is IdentityBinding.ACTIVE
-    return location.identity in (IdentityBinding.ACTIVE, IdentityBinding.ADMIN)
-
-
 def _inventory_by_name(
     contract: CredentialContract, inventory: SecretInventory,
 ) -> dict[str, SecretSnapshot]:
@@ -356,30 +304,6 @@ def build_candidate_propagation_wave(
     )
 
 
-def _intent_membership(
-    intent: PropagationWaveIntent,
-) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    return tuple(
-        (
-            group.namespace, group.secret_name,
-            tuple(location.location_id for location in group.locations),
-        )
-        for group in intent.secret_groups
-    )
-
-
-def _contract_membership(
-    contract: CredentialContract, target: Identity,
-) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    grouped: dict[tuple[str, str], list[str]] = {}
-    for location in contract.locations:
-        if _applicable(location, target):
-            grouped.setdefault((contract.namespace, location.secret), []).append(location.name)
-    return tuple(
-        (key[0], key[1], tuple(sorted(grouped[key]))) for key in sorted(grouped)
-    )
-
-
 def _failed_reconciliation(
     intent: PropagationWaveIntent, status: WaveReconciliationStatus,
 ) -> PropagationWaveReconciliation:
@@ -403,7 +327,7 @@ def reconcile_propagation_wave(
         return _failed_reconciliation(intent, WaveReconciliationStatus.INTENT_MISMATCH)
     if (
         intent.contract_digest != propagation_contract_digest(contract)
-        or _intent_membership(intent) != _contract_membership(contract, desired.identity)
+        or intent_membership(intent) != contract_membership(contract, desired.identity)
     ):
         return _failed_reconciliation(intent, WaveReconciliationStatus.CONTRACT_DRIFT)
     if not set(wave.applied_location_ids) <= {
