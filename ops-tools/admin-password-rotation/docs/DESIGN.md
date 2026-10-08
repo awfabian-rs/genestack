@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slices 4A-4D are complete.
+Status: Slices 1-3 (through Slice 3E) and Slices 4A-4E are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -24,7 +24,14 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4D are complete.
   through direct APIs, observes the resulting rollout, persists per-action
   progress, and recovers outstanding debt after interruption. It does not
   advance runtime phases.
-- Runtime/service verification, SWITCH_TO_B, VERIFY_B, SWITCH_TO_A, VERIFY_A,
+- Slice 4E implements the transaction-level `SWITCH_TO_B` orchestration:
+  it composes the Slice 4B/4C propagation machinery and the Slice 4D restart
+  executor into a re-entrant phase runner that moves a completed `PREPARE_B`
+  transaction through the temporary cutover of every contracted
+  `identity: active` location to the breakglass credential, executes the
+  resulting restart debt, and advances the durable phase to `VERIFY_B`.
+  It does not perform `VERIFY_B` or any later phase.
+- Runtime/service verification (`VERIFY_B`), `SWITCH_TO_A`, `VERIFY_A`,
   lockout restoration, and all later orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
 
@@ -55,6 +62,7 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4D are complete.
 | `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it; execute a grouped Secret-level propagation wave with crash/recovery and changed-location accounting. |
 | `propagation_wave.py` | Plan complete propagated-location obligations, group them by Secret, and reconcile durable intent against fresh state. |
 | `restart.py` | Derive restart actions from durable changed-location accounting, dispatch the Kubernetes workload restart through direct APIs, observe the rollout to completion, persist per-action progress, and recover outstanding debt after interruption. |
+| `switch_to_b.py` | Compose the Slice 4B/4C propagation machinery and the Slice 4D restart executor into the re-entrant `SWITCH_TO_B` phase runner that advances a completed `PREPARE_B` transaction to `VERIFY_B`. |
 | `wave_digest.py` | Shared credential-free wave planning primitives (contract digest and membership) used by both planning and grouped execution. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 
@@ -859,6 +867,143 @@ merely because the credential locations are already at their target values.
 Slice 4D does not perform `SWITCH_TO_B`/`VERIFY_B`/`SWITCH_TO_A`/`VERIFY_A`,
 restore lockout, complete the transaction, or compose propagation and actions
 into a runtime phase. Those are later slices.
+
+### Implemented Slice 4E — SWITCH_TO_B orchestration
+
+Slice 4E composes the already-implemented Slice 4B/4C propagation machinery and
+the Slice 4D restart executor into the `SWITCH_TO_B` runtime phase. It does not
+introduce a second propagation or restart framework; it orchestrates the
+existing typed boundaries:
+
+```text
+validate transaction / phase / identity / environment / config
+    (fresh PasswordSafe B + fresh breakglass auth + fresh admin breeder)
+require the phase-qualified durable PREPARE_B completion evidence
+    (a single SUCCESS stable-a receipt AND a single SUCCESS breakglass-b2
+    receipt, both explicitly at phase PREPARE_B)
+    ->
+assert current Lease ownership
+    ->
+re-stamp the durable transaction's current execution on resume
+    ->
+plan or reconcile the immutable to-B propagation intent   (4B)
+    ->
+persist the intent durably when newly created (ownership-fenced) (4B)
+    ->
+execute the grouped propagation wave (4C)
+    ->
+execute and recover the derived restart debt (4D)
+    ->
+reobserve: require the wave to be safely reconciled and no debt outstanding
+    ->
+advance the durable phase to VERIFY_B (ownership-fenced) and stop
+```
+
+**Entry conditions.** `run_switch_to_b` proceeds only when a current transaction
+exists, its phase is `SWITCH_TO_B`, the environment and Keystone/PasswordSafe
+identity match the request, and the transaction's breakglass generation is
+established. Phase plus generation are *intent and history*, not proof that
+`PREPARE_B` actually succeeded, so the entry validation additionally requires the
+durable `PREPARE_B` completion evidence to be present and internally consistent.
+Each required receipt is matched on **both** `check_id` and `phase`, so a
+same-named receipt originating from another phase is treated as missing:
+
+- a single, `SUCCESS` `stable-a` verification receipt explicitly at phase
+  `PREPARE_B`, carrying the old-A `credential_generation` and the breeder
+  `target_uid` that `PREPARE_B` verified; and
+- a single, `SUCCESS` `breakglass-b2` verification receipt explicitly at phase
+  `PREPARE_B`, whose `credential_generation` equals the transaction's
+  `new_b_sha256`.
+
+A missing or wrong-phase receipt (`PREPARE_B_PREREQUISITE_MISSING`), a
+non-`SUCCESS` or malformed/ambiguous (zero or multiple matching) receipt
+(`PREPARE_B_PREREQUISITE_INVALID`), a missing required generation/UID, or a
+`breakglass-b2` generation that disagrees with `new_b_sha256` fails closed before
+any observation, mutation, or phase work. The evidence is *validated*, not
+synthesized: the runner does not fabricate a missing `stable-a` record from the
+current breeder.
+
+It does not trust a stale `PREPARE_B` result: the authoritative B credential is
+recovered freshly from PasswordSafe (the same
+"current PasswordSafe value plus the recorded generation" discipline `PREPARE_B`
+uses for `B1`) and its identity is re-validated by a fresh, correctly-scoped
+breakglass Keystone authentication. The canonical admin breeder is re-read and
+required to agree with the durable `stable-a` receipt — both the recorded old-A
+generation and the breeder Secret UID; a changed or regenerated breeder fails
+closed (`ADMIN_REFERENCE_INVALID`) because the propagation reference would then be
+wrong. Unknown or contradictory state fails closed before any Secret mutation.
+
+**Execution identity.** `transaction.execution` records the execution currently
+operating/resuming the transaction. It is credential-free bookkeeping, **not**
+the fencing mechanism: current Lease ownership (via `OwnershipGuard.assert_owned`)
+is the authoritative source of mutation permission. The three identifiers are
+distinct and must not be conflated:
+
+```text
+Lease                      = who is allowed to mutate now
+transaction.execution      = which execution is currently operating the transaction
+transaction_id             = which durable transaction this is
+```
+
+A durable update to transaction state — including the credential-free
+`transaction.execution` field — is itself a mutation, so current Lease ownership is
+asserted **before** the re-stamp. On every resume `run_switch_to_b` re-stamps
+`transaction.execution` to the request's execution (a legitimate takeover by
+execution `E2` updates the durable field to `E2`), via a CAS-protected
+state-store write that is performed only after the ownership assertion; when the
+durable execution already matches the resuming one it is a no-op. A stale
+execution that has lost the Lease cannot modify the durable transaction at all —
+even the bookkeeping field — because the ownership assertion precedes the write.
+This is intended as a **transaction-wide invariant**, not a `PREPARE_B`- or
+`SWITCH_TO_B`-specific convention. Bounded technical debt: the older `ROTATE_A`
+Slice 3D/3E entry points (`RotateAStageInputs`) do not carry an `execution` field
+and so do not uniformly maintain `transaction.execution`; that should be
+normalized when orchestration reaches that boundary, and is deliberately out of
+scope for this corrective pass.
+
+**Propagation target.** For this phase the target identity for every contracted
+`identity: active` propagated location is `breakglass`, using the transaction's
+established B generation. Fixed-identity `identity: admin` locations, and in
+particular the canonical `Secret/openstack/keystone-admin` breeder, are never
+switched to B. The work set is derived from the credential-location contract and
+the generic propagation machinery, not a bespoke list of Secret names.
+
+**Transaction progress.** No new schema object is added. The existing
+`PropagationWave` fields already distinguish every required recovery state: the
+immutable `intent` (created by 4B), `applied_location_ids` (changed-location
+accounting from 4C), and `runtime_actions` (`PENDING`/`RUNNING`/`COMPLETE` from
+4D). `SWITCH_TO_B` is complete when fresh observation establishes every intended
+location at the target, the wave is safely reconciled, and every derived runtime
+action is `COMPLETE`. At that point the phase advances to `VERIFY_B` and a
+credential-free `switch-to-b-complete` verification receipt (carrying only the
+B generation) is recorded. The phase advance is ownership-fenced.
+
+**Recovery and re-entry.** Every interruption boundary is recovered by observing
+the durable state and continuing the existing transaction:
+
+- no intent yet: the to-B obligation is planned and persisted once;
+- intent persisted but no propagation: the grouped wave executes from fresh
+  observation, with already-converged locations reported as no-ops;
+- partial propagation: 4C's crash/recovery model resumes without replaying
+  completed Secret writes and retains originally-non-target restart debt;
+- propagation complete, restart debt pending: 4D derives and executes the
+  actions from the durable changed-location accounting;
+- some runtime actions `RUNNING`: 4D re-observes each workload and confirms a
+  matching complete rollout without re-dispatch, otherwise conservatively
+  re-dispatches;
+- all actions `COMPLETE` but phase not yet advanced: the reobserve gate passes
+  and the phase advances without any needless redispatch.
+
+It does not blindly replay every Secret write, restart every workload, generate
+or stage a new B credential, or create a new transaction on re-entry. Stale,
+unknown, contradictory, concurrent, or contract-drift state reported by the
+existing machinery fails closed with the established typed semantics.
+
+**Exclusions.** Slice 4E performs no `VERIFY_B` (no service/authentication/health
+verification of the B safety bridge), no `ROTATE_A`, no `SWITCH_TO_A` /
+`VERIFY_A`, no lockout restoration, no final transaction completion or
+cleanup, and no Kubernetes Job/CronJob packaging or RBAC. It stops at the
+`VERIFY_B` boundary.
 
 ## Security and deployment limits
 

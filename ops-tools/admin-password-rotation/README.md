@@ -1,10 +1,11 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4D are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4E are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
-or reconcile breakglass and move the canonical admin credential through
-A0 -> A1 -> A2 -> A3. There is no complete end-to-end rotation command yet.
+or reconcile breakglass, move the canonical admin credential through
+A0 -> A1 -> A2 -> A3, and compose the ``SWITCH_TO_B`` cutover. There is no complete
+end-to-end rotation command yet.
 
 ```
 contract YAML -> validated immutable types -> Secret inventory
@@ -12,7 +13,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, and 4D are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, and 4E are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -100,13 +101,28 @@ tuple, derived deterministically. Unexpected durable runtime action IDs fail
 closed with `STALE_RUNTIME_ACTIONS`. It performs no credential mutation and
 advances no runtime phase.
 
-There is still no propagation-wave phase runner. Slice 4C safely executes the
-grouped per-Secret credential writes and records the actual changed-location
-accounting; Slice 4D executes and recovers the resulting restart debt. Neither
-performs runtime/service verification, restores all consumers to admin,
-`SWITCH_TO_B`, `VERIFY_B`, `SWITCH_TO_A`, `VERIFY_A`, lockout restoration, or
-final transaction completion. Lockout suppression needed by `ROTATE_A` is
-implemented, but the current Slice 3 path leaves it suppressed with restoration
+Slice 4E adds the transaction-level `SWITCH_TO_B` orchestration. It composes the
+Slice 4B propagation-wave planning/reconciliation, the Slice 4C grouped
+Secret-level propagation execution, and the Slice 4D restart/action executor into
+a single re-entrant phase runner. Starting from a transaction whose `PREPARE_B`
+has completed (phase `SWITCH_TO_B`, breakglass generation established), it
+recovers the authoritative B credential freshly from PasswordSafe and validates
+it by fresh breakglass authentication, then plans-or-reconciles and durably
+persists the immutable to-B propagation obligation, executes the grouped
+propagation wave so every contracted `identity: active` location converges to the
+breakglass credential, executes and recovers the resulting restart debt, and
+finally advances the durable phase to `VERIFY_B`. Fixed `identity: admin`
+locations and the canonical `keystone-admin` breeder are never switched to B.
+`SWITCH_TO_B` is interruption-safe: re-entry observes the durable wave intent,
+applied-location progress, and runtime-action state and continues without replaying
+completed Secret writes or workload restarts. It performs no `VERIFY_B`
+service/authentication health verification and does not enter `ROTATE_A`.
+
+There is still no `VERIFY_B` runner. Slice 4E advances the transaction to
+`VERIFY_B` and stops; it does not perform runtime/service verification, does not
+restore all consumers to admin, does not `SWITCH_TO_A`, `VERIFY_A`, restore
+lockout, or complete the transaction. Lockout suppression needed by `ROTATE_A`
+is implemented, but the current Slice 3 path leaves it suppressed with restoration
 still required.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
