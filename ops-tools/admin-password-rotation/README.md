@@ -1,10 +1,11 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4E are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4F are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass, move the canonical admin credential through
-A0 -> A1 -> A2 -> A3, and compose the ``SWITCH_TO_B`` cutover. There is no complete
+A0 -> A1 -> A2 -> A3, compose the ``SWITCH_TO_B`` cutover, and verify the B
+safety bridge before ``ROTATE_A``. There is no complete
 end-to-end rotation command yet.
 
 ```
@@ -13,7 +14,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, and 4E are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, and 4F are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -29,8 +30,9 @@ credential, and it leaves lockout suppressed with restoration still required.
 The implemented canonical `ROTATE_A` write order is breeder -> Keystone ->
 PasswordSafe, with forward recovery across A0/A1/A2/A3. These library workflows
 are not exposed as an end-to-end CLI runner. Runtime `SWITCH_TO_B` and `VERIFY_B`
-remain required before production execution may enter `ROTATE_A`; the ability to
-invoke its bounded primitives independently does not weaken that gate.
+are implemented library gates before production execution may enter `ROTATE_A`;
+the ability to invoke its bounded primitives independently does not weaken that
+gate.
 
 Slice 4A adds a library primitive that safely mutates one validated contracted
 `role: propagated` location to an explicitly supplied allowed admin or breakglass
@@ -118,17 +120,65 @@ applied-location progress, and runtime-action state and continues without replay
 completed Secret writes or workload restarts. It performs no `VERIFY_B`
 service/authentication health verification and does not enter `ROTATE_A`.
 
-There is still no `VERIFY_B` runner. Slice 4E advances the transaction to
-`VERIFY_B` and stops; it does not perform runtime/service verification, does not
-restore all consumers to admin, does not `SWITCH_TO_A`, `VERIFY_A`, restore
-lockout, or complete the transaction. Lockout suppression needed by `ROTATE_A`
-is implemented, but the current Slice 3 path leaves it suppressed with restoration
-still required.
+Slice 4F adds the transaction-level `VERIFY_B` gate: `run_verify_b()` in
+`verify_b.py`. It freshly establishes, from current observed state only, that
+the B safety bridge created by `SWITCH_TO_B` is real and sufficient to permit
+`ROTATE_A` to begin. It is observational: it never writes a propagated Secret,
+never dispatches or re-runs a workload restart, and never mutates the `admin`
+credential. The only durable write is the single ownership-fenced phase
+advance to `ROTATE_A` after every required check succeeds.
+
+The verification is:
+
+1. fresh breakglass observation (current PasswordSafe B record, generation
+   must match the transaction's B generation) plus a fresh, correctly-scoped
+   breakglass Keystone authentication — stale evidence from earlier phases is
+   explicitly rejected;
+2. fresh structural classification of every participating `identity: active`
+   propagated location (the complete applicable contract membership, not the
+   changed-location progress): each must parse through its declared
+   representation and structurally equal the verified breakglass credential —
+   missing Secrets, malformed representations, unknown credentials, locations
+   still on `admin`, or a different breakglass password all fail the gate.
+   Fixed `identity: admin` locations do not participate in the B identity
+   transition: they are required to match the verified admin reference and
+   fail closed on any other state (including a breakglass credential — a
+   password-only fixed-admin consumer interprets the stored password as
+   belonging to `admin` — a missing Secret, a malformed representation, or a
+   wrong admin password). The `keystone-admin` breeder is re-read and required
+   to still anchor the durable `stable-a` receipt;
+3. every restart action derived from the B wave's durable changed-location
+   accounting (the same derivation `SWITCH_TO_B` executed, with contract-digest
+   and stale-action validation) must be durably `COMPLETE`;
+4. every affected Deployment/DaemonSet must be freshly observed rolled out and
+   ready (generation convergence, replica counters, and the deterministic
+   restart marker for this wave in the Pod template), reusing the Slice 4D
+   workload abstraction and completion predicate.
+
+Durable progress flags are never accepted as proof: a record claiming
+propagation/restart completion while fresh Secret or workload state disagrees
+fails closed, and the transaction remains in `VERIFY_B` for re-observation.
+A failed verification persists nothing except the credential-free execution
+bookkeeping re-stamp performed on resume; it never writes a
+`verify-b-complete` receipt and never advances the phase. Re-entry is
+deterministic: only genuine successor phases (`ROTATE_A`, `SWITCH_TO_A`,
+`VERIFY_A`) are reported `ALREADY_ADVANCED` without re-running checks or
+regressing the phase; predecessor phases (`STABLE_A`, `PREPARE_B`,
+`SWITCH_TO_B`) are rejected as `UNSUPPORTED_PHASE`; and a crash after the
+checks but before the phase advance simply re-runs them. Fixed
+`identity: admin` locations and the canonical breeder are never switched to B
+or required to hold B. It performs no `ROTATE_A`, no A credential mutation,
+no `SWITCH_TO_A` / `VERIFY_A`, no lockout restoration, no final transaction
+completion, and no packaging.
 
 The Slice 2 boundaries use the Kubernetes Python API directly, while the external
 clients use `httpx`. The separate Slice 1 live planning adapter runs only `kubectl
 get secrets -o json` in an explicitly named context. Offline fixture mode does
 not invoke kubectl.
+
+Lockout suppression needed by `ROTATE_A` is implemented, but the current
+Slice 3 path leaves it suppressed with restoration still required; restoration
+remains later work.
 
 Slice 3A PasswordSafe support is limited to Rackspace Identity token acquisition,
 current-credential JSON reads and password-only JSON updates. Historical
