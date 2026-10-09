@@ -1,11 +1,12 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4F are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4G are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass, move the canonical admin credential through
-A0 -> A1 -> A2 -> A3, compose the ``SWITCH_TO_B`` cutover, and verify the B
-safety bridge before ``ROTATE_A``. There is no complete
+A0 -> A1 -> A2 -> A3, compose the ``SWITCH_TO_B`` cutover, verify the B
+safety bridge, and integrate the bounded ``ROTATE_A`` staging/convergence
+libraries into the runtime ``ROTATE_A`` phase. There is no complete
 end-to-end rotation command yet.
 
 ```
@@ -14,7 +15,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, and 4F are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, 4F, and 4G are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -127,6 +128,20 @@ the B safety bridge created by `SWITCH_TO_B` is real and sufficient to permit
 never dispatches or re-runs a workload restart, and never mutates the `admin`
 credential. The only durable write is the single ownership-fenced phase
 advance to `ROTATE_A` after every required check succeeds.
+
+Slice 4G adds the transaction-level `ROTATE_A` runtime integration:
+`run_rotate_a()` in `runtime_rotate_a.py`. It composes the bounded Slice 3D
+staging and Slice 3E convergence libraries into the `ROTATE_A` runtime phase,
+gated by the durable `verify-b-complete` receipt and the `PREPARE_B`
+`stable-a` / `breakglass-b2` evidence. It is re-entrant across every
+interruption boundary: a fresh A0 stages the canonical breeder with
+transaction provenance (Slice 3D); A1/A2/A3 resume without re-staging (Slice
+3E); a fresh A3 skips both libraries entirely. The runtime performs a fresh
+final A3 re-observation through the Slice 3C machinery before advancing the
+durable phase to `SWITCH_TO_A` with the credential-free `rotate-a-complete`
+receipt (A generation only). It performs no propagated-location mutation, no
+workload restart, no `SWITCH_TO_A` / `VERIFY_A`, no lockout restoration, no
+breeder provenance cleanup, and no transaction completion.
 
 The verification is:
 
@@ -339,3 +354,19 @@ contract. Start coding-agent work with `AGENTS.md` and
 `docs/HANDOFF.md`. `docs/DESIGN.md` describes the architecture currently
 implemented, while `docs/reference/README.md` explains the authority and
 status of the retained design references.
+
+## Current runtime progression
+
+```text
+PREPARE_B    implemented
+SWITCH_TO_B  implemented
+VERIFY_B     implemented
+ROTATE_A     runtime integration implemented (Slice 4G)
+SWITCH_TO_A  not yet implemented
+VERIFY_A     not yet implemented
+```
+
+Slice 3D / 3E = bounded `ROTATE_A` implementation (staging + convergence).
+Slice 4G = runtime integration of those bounded operations into the
+`ROTATE_A` phase. The end-to-end A → B → A transaction is **not** complete:
+`SWITCH_TO_A` and `VERIFY_A` remain.

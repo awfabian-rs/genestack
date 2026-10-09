@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slices 4A-4F are complete.
+Status: Slices 1-3 (through Slice 3E) and Slices 4A-4G are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -35,6 +35,13 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4F are complete.
   observational, fail-closed verification of the B safety bridge from fresh
   external state that advances a verified `VERIFY_B` transaction to
   `ROTATE_A`. It does not perform `ROTATE_A` or any later phase.
+- Slice 4G implements the transaction-level `ROTATE_A` runtime integration:
+  it composes the bounded Slice 3D staging and Slice 3E convergence
+  libraries into the `ROTATE_A` runtime phase, gated by the durable
+  `verify-b-complete` receipt and the `PREPARE_B` `stable-a` /
+  `breakglass-b2` evidence. It advances a converged transaction to
+  `SWITCH_TO_A` with the credential-free `rotate-a-complete` receipt.
+  It does not perform `SWITCH_TO_A` or any later phase.
 - `SWITCH_TO_A`, `VERIFY_A`, lockout restoration, and all later
   orchestration remain unimplemented.
 - No complete end-to-end rotation workflow is implemented.
@@ -63,6 +70,7 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4F are complete.
 | `a_state.py` | Read-only authoritative A-credential observation and A0-A3 reconciliation. |
 | `breeder.py` | Direct canonical-breeder reads and UID/resourceVersion-conditional password/provenance patches. |
 | `rotate_a.py` | Bounded Slice 3D A0-to-A1 staging and Slice 3E A1-to-A3 core-credential convergence. |
+| `runtime_rotate_a.py` | The re-entrant `ROTATE_A` runtime integration that composes the bounded Slice 3D staging and Slice 3E convergence libraries into the `ROTATE_A` phase, gated by the durable `verify-b-complete` receipt and `PREPARE_B` evidence, and advances a converged transaction to `SWITCH_TO_A`. |
 | `propagation.py` | Classify and conditionally mutate one propagated credential location, then read back and verify it; execute a grouped Secret-level propagation wave with crash/recovery and changed-location accounting. |
 | `propagation_wave.py` | Plan complete propagated-location obligations, group them by Secret, and reconcile durable intent against fresh state. |
 | `restart.py` | Derive restart actions from durable changed-location accounting, dispatch the Kubernetes workload restart through direct APIs, observe the rollout to completion, persist per-action progress, and recover outstanding debt after interruption. |
@@ -1134,6 +1142,108 @@ mutation, no `SWITCH_TO_A` / `VERIFY_A`, no lockout restoration (lockout state
 is not read or verified in this gate), no final transaction completion, and no
 Kubernetes Job/CronJob packaging or RBAC. It stops at the `ROTATE_A` boundary
 with the admin credential untouched.
+
+### Implemented Slice 4G — ROTATE_A runtime integration
+
+Slice 4G implements the transaction-level `ROTATE_A` runtime integration: the
+phase that, behind the now-implemented `VERIFY_B` gate, composes the bounded
+Slice 3D staging and Slice 3E convergence libraries into the `ROTATE_A`
+runtime phase and advances a converged transaction to `SWITCH_TO_A`.
+
+```text
+validate transaction / phase / identity / environment / config
+    (a transaction already past ROTATE_A returns ALREADY_ADVANCED
+     without re-running the machinery; a predecessor phase is rejected)
+require the phase-qualified durable completion evidence:
+    a single SUCCESS verify-b-complete receipt at VERIFY_B whose
+    generation equals the transaction's B generation, plus the PREPARE_B
+    stable-a/breakglass-b2 receipts that anchor the old-A reference
+    ->
+re-stamp the durable transaction's current execution on resume
+    (ownership-fenced bookkeeping, no-op when already current)
+    ->
+run or resume Slice 3D staging (run_rotate_a_stage_breeder):
+    fresh A0 -> lockout suppression + A-new generation + breeder staging;
+    A1/A2/A3 -> resume without re-staging
+    ->
+run or resume Slice 3E convergence (run_rotate_a_converge):
+    A1 -> Keystone reset -> A2 -> PasswordSafe update -> fresh A3;
+    A2 -> PasswordSafe update -> fresh A3;
+    A3 -> no A mutation
+    ->
+fresh final A3 re-verification through the Slice 3C observation machinery
+    (fresh breeder read, fresh PasswordSafe A read, fresh admin Keystone
+    authentication); requires a valid A3 classification
+    ->
+advance the durable phase to SWITCH_TO_A (ownership-fenced) with the
+    credential-free rotate-a-complete receipt (A generation only) and stop
+```
+
+**Entry conditions.** `run_rotate_a` proceeds only when a current transaction
+exists, its phase is `ROTATE_A`, the environment and Keystone/PasswordSafe
+identity match the request, and the transaction's B generation is
+established. The phase-qualified `verify-b-complete` receipt (at phase
+`VERIFY_B`, generation equal to `new_b_sha256`) proves the B safety bridge
+durably passed the gate; the `PREPARE_B` `stable-a` / `breakglass-b2`
+receipts anchor the old-A generation and breeder UID that the A0-A3
+machinery validates against. Missing, wrong-phase, non-success, malformed, or
+generation-inconsistent evidence fails closed before any observation,
+mutation, or phase work. The evidence is *validated*, never synthesized.
+
+**Composition.** The runtime slice adds no new credential-mutation logic. It
+composes the bounded Slice 3D and Slice 3E libraries, which own every
+correctness-sensitive mechanism: password generation, breeder staging with
+transaction provenance, Keystone/PasswordSafe mutation, ambiguous-dispatch
+recovery, A-state classification, and read-after-write verification. The
+runtime's own durable writes are limited to the ownership-fenced execution
+re-stamp and the phase advance with the credential-free `rotate-a-complete`
+receipt. A bounded-library failure is re-raised unchanged (the operator sees
+the library's own typed error category) and leaves the transaction blocked in
+`ROTATE_A` for re-observation.
+
+**Recovery and re-entry.** Re-entry is safe across every interruption
+boundary:
+
+- fresh A0: Slice 3D establishes lockout suppression, generates and durably
+  identifies A-new, and stages the canonical breeder with transaction
+  provenance; Slice 3E then converges from A1;
+- fresh A1: Slice 3D resumes without re-staging (the breeder already holds
+  the intended A-new with transaction provenance); Slice 3E resets Keystone
+  and converges PasswordSafe;
+- fresh A2: Slice 3D reports ahead-of-slice; Slice 3E updates PasswordSafe
+  and converges to A3;
+- fresh A3: both libraries skip their mutation work; the runtime performs a
+  fresh final A3 re-observation and advances the phase.
+
+The staged A-new generation is immutable once durably established: recovery
+from A1, A2, or A3 never generates a replacement credential. Durable progress
+flags are never authority: the A0-A3 classifier and the bounded libraries
+classify from observed external state, and contradictory progress is either
+reconciled from observation or fails closed.
+
+**Fresh final A3 verification.** Before the phase advances, the runtime
+re-observes the authoritative A boundary directly through the Slice 3C
+machinery: a fresh breeder read, a fresh PasswordSafe A read, and a fresh
+admin Keystone authentication. The result must be a valid A3 classification
+at the transaction's A generation. Any invalid, indeterminate, or non-A3
+classification fails closed before the phase advances. This verification is
+of `ROTATE_A`'s authoritative boundary only; it does not inspect propagated
+credential locations (that is `SWITCH_TO_A` / `VERIFY_A` work).
+
+**Completion receipt.** The phase advance to `SWITCH_TO_A` is accompanied by
+a credential-free `rotate-a-complete` verification receipt (at phase
+`ROTATE_A`, carrying the A generation only). The receipt is written only on
+success; a failed invocation never writes it and never advances the phase.
+The receipt and phase advance are a single ownership-fenced CAS-protected
+state-store write.
+
+**Exclusions.** Slice 4G performs no `SWITCH_TO_A` (no propagated-location
+mutation, no workload restart), no `VERIFY_A`, no lockout restoration (lockout
+remains suppressed, restoration remains required), no breeder provenance
+cleanup (the transaction provenance remains on the canonical breeder), no
+final transaction completion, and no Kubernetes Job/CronJob packaging or
+RBAC. It stops at the `SWITCH_TO_A` boundary with the temporary breakglass
+propagation still in place.
 
 ## Security and deployment limits
 
