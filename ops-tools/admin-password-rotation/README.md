@@ -1,12 +1,14 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4G are complete. The CLI remains focused on
+password-rotation tool. Slices 1-3 and Slices 4A-4H are complete. The CLI remains focused on
 topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass, move the canonical admin credential through
 A0 -> A1 -> A2 -> A3, compose the ``SWITCH_TO_B`` cutover, verify the B
-safety bridge, and integrate the bounded ``ROTATE_A`` staging/convergence
-libraries into the runtime ``ROTATE_A`` phase. There is no complete
+safety bridge, integrate the bounded ``ROTATE_A`` staging/convergence
+libraries into the runtime ``ROTATE_A`` phase, and integrate the ``SWITCH_TO_A``
+reverse cutover (propagating the new admin credential back to the participating
+consumers and executing its restart debt). There is no complete
 end-to-end rotation command yet.
 
 ```
@@ -15,7 +17,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, 4F, and 4G are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, 4F, 4G, and 4H are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -142,6 +144,32 @@ durable phase to `SWITCH_TO_A` with the credential-free `rotate-a-complete`
 receipt (A generation only). It performs no propagated-location mutation, no
 workload restart, no `SWITCH_TO_A` / `VERIFY_A`, no lockout restoration, no
 breeder provenance cleanup, and no transaction completion.
+
+Slice 4H adds the transaction-level `SWITCH_TO_A` runtime integration:
+`run_switch_to_a()` in `switch_to_a.py`. It composes the Slice 4B/4C
+propagation machinery (with the **admin** target) and the Slice 4D restart
+executor into the `SWITCH_TO_A` phase, gated by the durable `rotate-a-complete`
+receipt and the `PREPARE_B` `stable-a` / `breakglass-b2` evidence. It
+freshly reconciles the authoritative A boundary at A3 (fresh breeder read,
+fresh PasswordSafe A read, fresh admin Keystone authentication through the
+Slice 3C machinery) to establish the propagation source — the new admin
+credential is never trusted from any single location in isolation, and no new
+password is generated. It recovers the breakglass (B) credential freshly from
+PasswordSafe only as the known-credential reference used to classify the
+participating `identity: active` locations (it is never propagated). It then
+plans-or-reconciles and durably persists the immutable to-A propagation
+obligation, executes the grouped propagation wave so every contracted
+`identity: active` location converges from breakglass/B to admin/new-A,
+executes and recovers the resulting restart debt, and advances the durable
+phase to `VERIFY_A` with the credential-free `switch-to-a-complete` receipt
+(A generation only). Fixed `identity: admin` propagated locations are no-ops;
+the canonical `keystone-admin` source is never a propagation target.
+`SWITCH_TO_A` is interruption-safe: re-entry observes the durable wave intent,
+applied-location progress, and runtime-action state and continues without
+replaying completed Secret writes or workload restarts. It performs no
+`VERIFY_A`, no Keystone/PasswordSafe admin mutation, no lockout restoration,
+no breeder provenance cleanup, no transaction completion, and no packaging; it
+stops at the `VERIFY_A` boundary.
 
 The verification is:
 
@@ -362,11 +390,14 @@ PREPARE_B    implemented
 SWITCH_TO_B  implemented
 VERIFY_B     implemented
 ROTATE_A     runtime integration implemented (Slice 4G)
-SWITCH_TO_A  not yet implemented
+SWITCH_TO_A  runtime integration implemented (Slice 4H)
 VERIFY_A     not yet implemented
 ```
 
 Slice 3D / 3E = bounded `ROTATE_A` implementation (staging + convergence).
 Slice 4G = runtime integration of those bounded operations into the
-`ROTATE_A` phase. The end-to-end A → B → A transaction is **not** complete:
-`SWITCH_TO_A` and `VERIFY_A` remain.
+`ROTATE_A` phase. Slice 4H = runtime integration of the Slice 4B/4C/4D
+propagation/restart machinery into the `SWITCH_TO_A` phase, returning the
+participating consumers from B to the newly rotated A. The end-to-end A → B → A
+transaction is **not** complete: `VERIFY_A` (observational final verification +
+transaction completion + breeder provenance cleanup) remains.
