@@ -557,6 +557,16 @@ class Api:
         assert (namespace, name) == ("openstack", "consumer")
         return self.resource
 
+    def list_namespaced_secret(
+        self, namespace: str, **kwargs: object,
+    ) -> object:
+        assert namespace == "openstack"
+        return {
+            "apiVersion": "v1", "kind": "SecretList",
+            "metadata": {"resourceVersion": "list"},
+            "items": [self.resource],
+        }
+
     def patch_namespaced_secret(
         self, name: str, namespace: str, body: list[dict[str, object]],
         **kwargs: object,

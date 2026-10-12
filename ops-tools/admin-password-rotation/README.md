@@ -1,15 +1,17 @@
 # Genestack Keystone admin password rotation
 
 Staged implementation of the Genestack Keystone administrative
-password-rotation tool. Slices 1-3 and Slices 4A-4H are complete. The CLI remains focused on
-topology inspection and planning, while bounded library workflows can establish
+password-rotation tool. Slices 1-3 and Slices 4A-4I are complete. The CLI remains focused
+on topology inspection and planning, while bounded library workflows can establish
 or reconcile breakglass, move the canonical admin credential through
 A0 -> A1 -> A2 -> A3, compose the ``SWITCH_TO_B`` cutover, verify the B
 safety bridge, integrate the bounded ``ROTATE_A`` staging/convergence
-libraries into the runtime ``ROTATE_A`` phase, and integrate the ``SWITCH_TO_A``
-reverse cutover (propagating the new admin credential back to the participating
-consumers and executing its restart debt). There is no complete
-end-to-end rotation command yet.
+libraries into the runtime ``ROTATE_A`` phase, integrate the ``SWITCH_TO_A``
+reverse cutover, and independently verify the final stable-A state and
+finalize the transaction. The complete runtime phase sequence
+(``PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A -> SWITCH_TO_A ->
+VERIFY_A``) is now implemented; packaging, CLI orchestration, and
+production integration remain separate work.
 
 ```
 contract YAML -> validated immutable types -> Secret inventory
@@ -17,7 +19,7 @@ contract YAML -> validated immutable types -> Secret inventory
              -> undeclared-copy audit -> credential-free topology report
 ```
 
-Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, 4F, 4G, and 4H are implemented. PREPARE_B is a real
+Slices 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, 3E, 4A, 4B, 4C, 4D, 4E, 4F, 4G, 4H, and 4I are implemented. PREPARE_B is a real
 library workflow: it may update only the breakglass credential in PasswordSafe
 and Keystone, with durable intent, ownership checks, fresh observation, and
 postcondition verification. Slice 3C observes and reconciles A state without
@@ -170,6 +172,93 @@ replaying completed Secret writes or workload restarts. It performs no
 `VERIFY_A`, no Keystone/PasswordSafe admin mutation, no lockout restoration,
 no breeder provenance cleanup, no transaction completion, and no packaging; it
 stops at the `VERIFY_A` boundary.
+
+Slice 4I adds the transaction-level `VERIFY_A` runtime integration:
+`run_verify_a()` in `verify_a.py`. It is the final runtime phase of the
+A -> B -> A rotation transaction. It independently re-observes the stable-A
+system state left by `SWITCH_TO_A`, performs only the narrowly permitted
+transaction-scoped cleanup, and durably marks the transaction complete.
+
+It revalidates the predecessor boundary: the durable `switch-to-a-complete`
+receipt (phase `SWITCH_TO_A`, generation equal to the transaction's A
+generation), the `rotate-a-complete` receipt, and the `PREPARE_B` `stable-a`
+/ `breakglass-b2` evidence. A transaction whose durable state already records
+completion returns `ALREADY_COMPLETED` deterministically without re-running
+any checks or mutating anything.
+
+The final authoritative-A verification freshly re-observes the canonical
+breeder, the PasswordSafe A record, and a fresh admin Keystone
+authentication — all required to classify A3 at the transaction's A
+generation. The final propagated-location contract is verified over the
+complete applicable admin membership of the current contract: every
+`identity: active` location must freshly parse to the verified admin/new-A
+credential, and every fixed `identity: admin` propagated location must
+classify as `MATCHES_ADMIN_REFERENCE`. Strict topology verification uses a
+fresh namespace listing to detect unexpected administrative-credential
+Secrets. Restart/workload verification reuses the Slice 4D semantics
+observationally: every derived restart action must be durably `COMPLETE`
+and every affected workload must be freshly observed rolled out and ready
+with the deterministic to-A restart marker.
+
+Once the final state is proven, two transaction-scoped cleanups are
+performed, each under current Lease ownership and with fresh read-back
+verification:
+
+1. **Lockout restoration**: the temporary lockout suppression policy is
+   restored to the transaction's recorded pre-rotation value. Resumable: an
+   already-restored policy is recognized and left alone; an ambiguous
+   dispatch fails closed.
+2. **Breeder provenance cleanup**: the transaction's provenance annotations
+   are removed from the canonical breeder via a UID/resourceVersion-conditional
+   JSON Patch. The breeder password is never touched. Provenance owned by
+   another transaction, carrying a different generation, or a malformed
+   breeder fails closed.
+
+The final durable completion persists the credential-free
+`verify-a-complete` receipt (A generation, `stable-a-verified`), the
+`rotation-complete` marker receipt, the `COMPLETED` transaction status, the
+terminal `STABLE_A` phase, a cleared `last_error`, the discharged lockout
+state, and the durable `completed_requests` history entry. The transaction
+record is retained as durable history; it is not deleted.
+
+`VERIFY_A` is observational about the final state: it never propagates a
+credential, never generates or resets a password, never restarts a workload
+as repair, and never rewrites the admin credential. Credential or
+configuration drift discovered here fails closed; the operator re-observes
+and recovers from durable state.
+
+The verification is:
+
+1. fresh authoritative-A reconciliation (Slice 3C machinery): breeder,
+   PasswordSafe A, and admin Keystone auth all at A3 at the transaction's
+   A generation;
+2. fresh breakglass reference (PasswordSafe B record + breakglass Keystone
+   auth) used only as the known-credential classification reference;
+3. fresh structural classification of every participating `identity: active`
+   propagated location (the complete applicable contract membership): each
+   must parse through its declared representation and structurally equal the
+   verified admin/new-A credential — missing Secrets, malformed
+   representations, unknown credentials, locations still on breakglass/B,
+   old-A values, or a different admin password all fail the gate. Fixed
+   `identity: admin` locations must classify as `MATCHES_ADMIN_REFERENCE`;
+4. strict topology verification against the full namespace listing: an
+   uncontracted administrative-credential Secret fails closed;
+5. every restart action derived from the to-A wave's durable
+   changed-location accounting must be durably `COMPLETE`;
+6. every affected Deployment/DaemonSet must be freshly observed rolled out
+   and ready with the deterministic to-A restart marker.
+
+Durable progress flags are never accepted as proof. A failed verification
+persists nothing except the credential-free execution bookkeeping re-stamp
+and the resumable lockout-restoration bookkeeping; it never writes a
+`verify-a-complete` receipt and never advances the phase. Re-entry is
+deterministic: a completed transaction returns `ALREADY_COMPLETED` without
+re-running checks; a crash after any cleanup step but before completion
+re-observes and continues without repeating unnecessary mutations.
+`VERIFY_A` performs no propagation, no password generation, no Keystone
+reset, no workload restart, and no packaging.
+
+Slice 4F `VERIFY_B` verification (continued from above):
 
 The verification is:
 
@@ -391,13 +480,26 @@ SWITCH_TO_B  implemented
 VERIFY_B     implemented
 ROTATE_A     runtime integration implemented (Slice 4G)
 SWITCH_TO_A  runtime integration implemented (Slice 4H)
-VERIFY_A     not yet implemented
+VERIFY_A     runtime integration implemented (Slice 4I)
 ```
 
 Slice 3D / 3E = bounded `ROTATE_A` implementation (staging + convergence).
 Slice 4G = runtime integration of those bounded operations into the
 `ROTATE_A` phase. Slice 4H = runtime integration of the Slice 4B/4C/4D
 propagation/restart machinery into the `SWITCH_TO_A` phase, returning the
-participating consumers from B to the newly rotated A. The end-to-end A → B → A
-transaction is **not** complete: `VERIFY_A` (observational final verification +
-transaction completion + breeder provenance cleanup) remains.
+participating consumers from B to the newly rotated A. Slice 4I = the
+`VERIFY_A` phase: independent final stable-A verification, lockout
+restoration, breeder provenance cleanup, and durable transaction completion
+in the terminal `STABLE_A` state. The complete runtime phase sequence
+(`PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A -> SWITCH_TO_A ->
+VERIFY_A`) is now implemented.
+
+### What remains outside the completed transaction runtime
+
+- Top-level CLI/orchestrator that composes all six runtime phases into an
+  end-to-end rotation command.
+- Kubernetes Job/CronJob packaging and RBAC manifests.
+- Production/integration testing against live clusters.
+- Operational rollout work (runbooks, alerting, monitoring).
+- The CLI remains a read-only topology inspector; it does not invoke the
+  rotation workflow.

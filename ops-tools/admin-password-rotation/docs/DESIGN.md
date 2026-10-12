@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slices 4A-4H are complete.
+Status: Slices 1-3 (through Slice 3E) and Slices 4A-4I are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -52,9 +52,19 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4H are complete.
   executes the resulting restart debt, and advances the transaction to
   `VERIFY_A` with the credential-free `switch-to-a-complete` receipt.
   It does not perform `VERIFY_A` or any later phase.
-- `VERIFY_A`, lockout restoration, and all later orchestration remain
-  unimplemented.
-- No complete end-to-end rotation workflow is implemented.
+- Slice 4I implements the transaction-level `VERIFY_A` runtime
+  integration: it independently re-observes the stable-A system state left by
+  `SWITCH_TO_A` (authoritative A at A3, every participating and fixed-admin
+  location at admin/new-A, strict topology, restart/workload completion),
+  performs the transaction-scoped finalization cleanups (lockout restoration,
+  breeder provenance cleanup), and durably marks the transaction complete in
+  the terminal `STABLE_A` state. It is observational about the final state:
+  no propagation, no password generation, no Keystone reset, no workload
+  restart. It does not perform packaging, CLI orchestration, or production
+  integration.
+- No complete end-to-end rotation CLI command is implemented; the runtime
+  phase sequence (`PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A ->
+  SWITCH_TO_A -> VERIFY_A`) is now fully implemented as library workflows.
 
 ## Boundaries
 
@@ -87,6 +97,7 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4H are complete.
 | `restart.py` | Derive restart actions from durable changed-location accounting, dispatch the Kubernetes workload restart through direct APIs, observe the rollout to completion, persist per-action progress, and recover outstanding debt after interruption. |
 | `switch_to_b.py` | Compose the Slice 4B/4C propagation machinery and the Slice 4D restart executor into the re-entrant `SWITCH_TO_B` phase runner that advances a completed `PREPARE_B` transaction to `VERIFY_B`. |
 | `verify_b.py` | The re-entrant, observational `VERIFY_B` gate that freshly verifies the B safety bridge (breakglass authentication, participating location state, restart completion, workload health) and advances a verified transaction to `ROTATE_A`. |
+| `verify_a.py` | The re-entrant `VERIFY_A` runtime integration that independently re-observes the final stable-A state (authoritative A at A3, propagated/fixed-admin locations, strict topology, restart/workload completion), performs transaction-scoped finalization cleanups (lockout restoration, breeder provenance cleanup), and durably marks the transaction complete in the terminal `STABLE_A` state. |
 | `wave_digest.py` | Shared credential-free wave planning primitives (contract digest and membership) used by both planning and grouped execution. |
 | `cli.py` | Select input mode, enforce opt-in, report errors and return exit status. |
 

@@ -178,6 +178,8 @@ class CredentialSecretClientError(Exception):
 class CredentialSecretClient(Protocol):
     def read(self, namespace: str, name: str) -> SecretSnapshot: ...
 
+    def list(self, namespace: str) -> tuple[SecretSnapshot, ...]: ...
+
     def conditional_replace(
         self, expected: SecretSnapshot, replacements: tuple[SecretField, ...],
     ) -> None: ...
@@ -186,6 +188,10 @@ class CredentialSecretClient(Protocol):
 class _CoreV1SecretApi(Protocol):
     def read_namespaced_secret(
         self, name: str, namespace: str, **kwargs: object,
+    ) -> object: ...
+
+    def list_namespaced_secret(
+        self, namespace: str, **kwargs: object,
     ) -> object: ...
 
     def patch_namespaced_secret(
@@ -232,6 +238,20 @@ def _snapshot(
     return inventory.secrets[0]
 
 
+def _list_snapshot(
+    resource: object, serializer: _KubernetesSerializer, namespace: str,
+) -> tuple[SecretSnapshot, ...]:
+    """Parse a Kubernetes SecretList into the namespace's Secret snapshots."""
+    try:
+        normalized = serializer.sanitize_for_serialization(resource)
+        inventory = parse_inventory(json.dumps(normalized).encode("utf-8"), namespace)
+    except (ReadError, TypeError, ValueError, UnicodeError):
+        raise CredentialSecretClientError(CredentialSecretClientErrorCode.FAILURE) from None
+    return tuple(
+        secret for secret in inventory.secrets if secret.namespace == namespace
+    )
+
+
 class KubernetesApiCredentialSecretClient:
     """Direct Secret GET and atomic UID/resourceVersion-tested JSON Patch."""
 
@@ -276,6 +296,20 @@ class KubernetesApiCredentialSecretClient:
             )
             raise CredentialSecretClientError(kind) from None
         return _snapshot(resource, self._serializer, namespace, name)
+
+    def list(self, namespace: str) -> tuple[SecretSnapshot, ...]:
+        try:
+            resource = self._api.list_namespaced_secret(
+                namespace, _request_timeout=self._timeout,
+            )
+        except Exception as exc:
+            kind = (
+                CredentialSecretClientErrorCode.NOT_FOUND
+                if _http_status(exc) == 404
+                else CredentialSecretClientErrorCode.FAILURE
+            )
+            raise CredentialSecretClientError(kind) from None
+        return _list_snapshot(resource, self._serializer, namespace)
 
     def conditional_replace(
         self, expected: SecretSnapshot, replacements: tuple[SecretField, ...],
@@ -507,6 +541,13 @@ class FakeCredentialSecretClient:
         if self.read_error is not None:
             raise CredentialSecretClientError(self.read_error)
         return self._current(namespace, name)
+
+    def list(self, namespace: str) -> tuple[SecretSnapshot, ...]:
+        return tuple(
+            secret for _, secret in sorted(
+                self.secrets.items(), key=lambda item: item[0][1],
+            ) if secret.namespace == namespace
+        )
 
     def conditional_replace(
         self, expected: SecretSnapshot, replacements: tuple[SecretField, ...],

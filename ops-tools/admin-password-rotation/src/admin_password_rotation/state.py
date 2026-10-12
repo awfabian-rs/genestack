@@ -498,8 +498,16 @@ def _transaction(value: object) -> RotationTransaction:
         lockout=_lockout(data["lockout"]),
         verifications=verifications,
     )
-    if result.status is TransactionStatus.COMPLETED:
-        raise ReadError("invalid_current_transaction", "The current transaction must be unfinished.")
+    if (
+        result.status is TransactionStatus.COMPLETED
+        and result.phase is not RotationPhase.STABLE_A
+    ):
+        raise ReadError("invalid_current_transaction", "A completed transaction must be in the terminal stable-A phase.")
+    if (
+        result.status is TransactionStatus.COMPLETED
+        and result.last_error is not None
+    ):
+        raise ReadError("invalid_current_transaction", "A completed transaction must not carry a last error.")
     if result.status is TransactionStatus.BLOCKED and result.last_error is None:
         raise ReadError("invalid_current_transaction", "A blocked transaction requires safe last-error information.")
     if result.updated_at < result.created_at:
@@ -566,11 +574,53 @@ def parse_state_json(raw: str | bytes) -> PersistentState:
     if len({item.transaction_id for item in completed}) != len(completed):
         raise ReadError("duplicate_completed_transaction", "Persistent state repeats a completed transaction ID.")
     current = None if current_value is None else _transaction(current_value)
-    if current is not None and any(
-        item.request_id == current.request_id or item.transaction_id == current.transaction_id
-        for item in completed
-    ):
-        raise ReadError("inconsistent_request_state", "A request cannot be both current and completed.")
+    if current is not None:
+        if current.status is TransactionStatus.COMPLETED:
+            # A terminal (completed) transaction is retained as the current
+            # durable record.  Because run_verify_a() treats a structurally
+            # valid COMPLETED/STABLE_A record as ALREADY_COMPLETED without
+            # re-running external verification, the terminal state must be
+            # strict: exactly one completed_requests entry must match both the
+            # request_id and transaction_id with outcome SUCCEEDED.  The
+            # top-level uniqueness checks already forbid duplicate request_ids
+            # and duplicate transaction_ids across the history, so:
+            #   - no matching entry            -> missing completion record
+            #   - matching with non-SUCCEEDED   -> contradictory outcome
+            #   - request_id under a different transaction_id (or vice versa)
+            #                                  -> cross-association
+            # are all rejected below.
+            matches = [
+                item for item in completed
+                if item.request_id == current.request_id
+                and item.transaction_id == current.transaction_id
+            ]
+            if len(matches) != 1:
+                raise ReadError(
+                    "inconsistent_request_state",
+                    "A completed current transaction requires exactly one matching completed-request record.",
+                )
+            if matches[0].outcome is not CompletedOutcome.SUCCEEDED:
+                raise ReadError(
+                    "inconsistent_request_state",
+                    "The completed current transaction's completion record must have a succeeded outcome.",
+                )
+            if any(
+                (item.request_id == current.request_id
+                 and item.transaction_id != current.transaction_id)
+                or (item.transaction_id == current.transaction_id
+                    and item.request_id != current.request_id)
+                for item in completed
+            ):
+                raise ReadError(
+                    "inconsistent_request_state",
+                    "A completed current transaction's request and transaction IDs must not be cross-associated with other completion records.",
+                )
+        else:
+            if any(
+                item.request_id == current.request_id or item.transaction_id == current.transaction_id
+                for item in completed
+            ):
+                raise ReadError("inconsistent_request_state", "A request cannot be both current and completed.")
     return PersistentState(schema_version, _environment(data["environment"]), current, completed)
 
 

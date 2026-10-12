@@ -385,6 +385,108 @@ def test_current_transaction_cannot_also_be_completed() -> None:
         parse_state_json(encoded(value))
 
 
+def _terminal_state() -> PersistentState:
+    """A valid terminal: COMPLETED/STABLE_A current transaction + one matching
+    SUCCEEDED completed_requests entry."""
+    base = realistic_state()
+    assert base.current_transaction is not None
+    completed_transaction = replace(
+        base.current_transaction,
+        phase=RotationPhase.STABLE_A,
+        status=TransactionStatus.COMPLETED,
+        last_error=None,
+        lockout=replace(
+            base.current_transaction.lockout,
+            restoration=LockoutChangeState.EFFECT_OBSERVED,
+            restore_required=False,
+        ),
+        updated_at=UPDATED,
+    )
+    entry = CompletedRequest(
+        request_id=completed_transaction.request_id,
+        transaction_id=completed_transaction.transaction_id,
+        completed_at=UPDATED, outcome=CompletedOutcome.SUCCEEDED,
+    )
+    return replace(
+        base,
+        current_transaction=completed_transaction,
+        completed_requests=(entry,),
+    )
+
+
+def _terminal_document() -> dict[str, object]:
+    return state_document(_terminal_state())
+
+
+def test_terminal_completed_state_round_trip() -> None:
+    state = _terminal_state()
+    serialized = serialize_state_json(state)
+    assert parse_state_json(serialized) == state
+    assert serialize_state_json(parse_state_json(serialized)) == serialized
+    # The completion is recorded in the durable history and in the current
+    # transaction, and both agree.
+    assert state.current_transaction is not None
+    assert state.current_transaction.status is TransactionStatus.COMPLETED
+    assert state.current_transaction.phase is RotationPhase.STABLE_A
+    assert len(state.completed_requests) == 1
+    assert state.completed_requests[0].outcome is CompletedOutcome.SUCCEEDED
+
+
+def test_terminal_completed_state_without_history_rejected() -> None:
+    # A COMPLETED/STABLE_A current transaction with no matching history entry
+    # is structurally invalid: the terminal state must be self-evident.
+    value = _terminal_document()
+    value["completed_requests"] = []
+    with pytest.raises(ReadError, match="inconsistent_request_state"):
+        parse_state_json(encoded(value))
+
+
+def test_terminal_completed_state_non_succeeded_history_rejected() -> None:
+    value = _terminal_document()
+    history = object_list(value["completed_requests"])
+    mutable_mapping(history[0])["outcome"] = "failed"
+    with pytest.raises(ReadError, match="inconsistent_request_state"):
+        parse_state_json(encoded(value))
+
+
+def test_terminal_completed_state_blocked_history_rejected() -> None:
+    value = _terminal_document()
+    history = object_list(value["completed_requests"])
+    mutable_mapping(history[0])["outcome"] = "blocked"
+    with pytest.raises(ReadError, match="inconsistent_request_state"):
+        parse_state_json(encoded(value))
+
+
+def test_terminal_completed_state_request_cross_association_rejected() -> None:
+    # The current request_id appears under a different transaction_id.
+    value = _terminal_document()
+    history = object_list(value["completed_requests"])
+    mutable_mapping(history[0])["transaction_id"] = str(UUID(int=999))
+    with pytest.raises(ReadError, match="inconsistent_request_state"):
+        parse_state_json(encoded(value))
+
+
+def test_terminal_completed_state_transaction_cross_association_rejected() -> None:
+    # The current transaction_id appears under a different request_id.
+    value = _terminal_document()
+    history = object_list(value["completed_requests"])
+    mutable_mapping(history[0])["request_id"] = str(UUID(int=888))
+    with pytest.raises(ReadError, match="inconsistent_request_state"):
+        parse_state_json(encoded(value))
+
+
+def test_terminal_completed_state_never_reports_duplicate_completion() -> None:
+    # The top-level uniqueness guard forbids two history entries sharing a
+    # request_id (or a transaction_id), so a duplicate matching completion
+    # cannot be represented as valid state: it is rejected before the
+    # terminal invariant is even evaluated.
+    value = _terminal_document()
+    history = object_list(value["completed_requests"])
+    history.append(dict(mutable_mapping(history[0])))
+    with pytest.raises(ReadError, match="duplicate_completed"):
+        parse_state_json(encoded(value))
+
+
 def test_completed_request_records_are_bounded() -> None:
     completed = tuple(
         CompletedRequest(
