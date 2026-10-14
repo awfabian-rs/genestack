@@ -360,6 +360,7 @@ class FakeKeystoneClient:
         self.password_update_calls: list[str] = []
         self.get_user_calls: list[str] = []
         self.lockout_update_calls: list[tuple[str, bool]] = []
+        self.auth_calls: list[str] = []
 
     def add_user(self, observation: KeystoneUserObservation, password: SecretValue) -> None:
         self._users[observation.user_id] = _FakeKeystoneUser(observation, password)
@@ -367,6 +368,7 @@ class FakeKeystoneClient:
     def authenticate_password(
         self, request: KeystonePasswordAuthRequest,
     ) -> KeystoneAuthenticationResult:
+        self.auth_calls.append(request.username)
         if self.next_auth_indeterminate is not None:
             reason = self.next_auth_indeterminate
             self.next_auth_indeterminate = None

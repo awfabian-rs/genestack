@@ -10,9 +10,12 @@ import pytest
 from admin_password_rotation.breeder import (
     PROVENANCE_GENERATION, PROVENANCE_STAGE, PROVENANCE_STAGE_PENDING_KEYSTONE,
     PROVENANCE_TRANSACTION, BreederError, BreederErrorCode, BreederProvenance,
-    BreederReference, KubernetesApiBreederSecretClient,
+    BreederReference, ConditionalPatchError, ConditionalPatchErrorCode,
+    KubernetesApiBreederSecretClient, KubernetesApiConditionalBreederPatch,
 )
-from admin_password_rotation.model import CredentialGeneration, SecretValue
+from admin_password_rotation.model import (
+    CredentialGeneration, SecretSnapshot, SecretValue,
+)
 
 
 PASSWORD = SecretValue(b"Old_0123456789abcdefghijklmnop")
@@ -162,3 +165,103 @@ def test_missing_annotations_are_added_before_individual_provenance_keys() -> No
     )
     assert api.patch is not None
     assert {"op": "add", "path": "/metadata/annotations", "value": {}} in api.patch
+
+
+# ---------------------------------------------------------------------------
+# Correction 3: conditional breeder patch adapter validation
+# ---------------------------------------------------------------------------
+
+
+def _make_patcher(api: Api) -> KubernetesApiConditionalBreederPatch:
+    return KubernetesApiConditionalBreederPatch(api)
+
+
+def _make_breeder_client(api: Api) -> KubernetesApiBreederSecretClient:
+    return KubernetesApiBreederSecretClient(api, Serializer())
+
+
+def _read(api: Api) -> SecretSnapshot:
+    return _make_breeder_client(api).read(BreederReference())
+
+
+def _preconditions(expected: SecretSnapshot) -> list[dict[str, object]]:
+    return [
+        {"op": "test", "path": "/metadata/uid", "value": expected.uid},
+        {"op": "test", "path": "/metadata/resourceVersion", "value": expected.resource_version},
+    ]
+
+
+def test_conditional_patch_allows_provenance_removal_only() -> None:
+    api = Api()
+    patcher = _make_patcher(api)
+    observed = _read(api)
+    ops = _preconditions(observed) + [
+        {"op": "remove", "path": f"/metadata/annotations/{PROVENANCE_TRANSACTION}"},
+        {"op": "remove", "path": f"/metadata/annotations/{PROVENANCE_GENERATION}"},
+        {"op": "remove", "path": f"/metadata/annotations/{PROVENANCE_STAGE}"},
+    ]
+    patcher.patch(observed, ops)  # must not raise
+    assert api.patch == ops
+
+
+def test_conditional_patch_rejects_data_field_removal() -> None:
+    api = Api()
+    patcher = _make_patcher(api)
+    observed = _read(api)
+    ops = _preconditions(observed) + [{"op": "remove", "path": "/data/password"}]
+    with pytest.raises(ConditionalPatchError) as raised:
+        patcher.patch(observed, ops)
+    assert raised.value.kind is ConditionalPatchErrorCode.FAILURE
+    assert api.patch is None  # rejected before dispatch
+
+
+def test_conditional_patch_rejects_add_operation() -> None:
+    api = Api()
+    patcher = _make_patcher(api)
+    observed = _read(api)
+    ops = _preconditions(observed) + [
+        {"op": "add", "path": f"/metadata/annotations/{PROVENANCE_STAGE}", "value": "x"},
+    ]
+    with pytest.raises(ConditionalPatchError) as raised:
+        patcher.patch(observed, ops)
+    assert raised.value.kind is ConditionalPatchErrorCode.FAILURE
+    assert api.patch is None
+
+
+def test_conditional_patch_rejects_unrelated_annotation_removal() -> None:
+    api = Api()
+    patcher = _make_patcher(api)
+    observed = _read(api)
+    ops = _preconditions(observed) + [
+        {"op": "remove", "path": "/metadata/annotations/example.org/keep"},
+    ]
+    with pytest.raises(ConditionalPatchError) as raised:
+        patcher.patch(observed, ops)
+    assert raised.value.kind is ConditionalPatchErrorCode.FAILURE
+    assert api.patch is None
+
+
+def test_conditional_patch_rejects_remove_with_value() -> None:
+    api = Api()
+    patcher = _make_patcher(api)
+    observed = _read(api)
+    ops = _preconditions(observed) + [
+        {"op": "remove", "path": f"/metadata/annotations/{PROVENANCE_STAGE}", "value": "pending-keystone"},
+    ]
+    with pytest.raises(ConditionalPatchError) as raised:
+        patcher.patch(observed, ops)
+    assert raised.value.kind is ConditionalPatchErrorCode.FAILURE
+    assert api.patch is None
+
+
+def test_conditional_patch_rejects_empty_or_short_patch() -> None:
+    api = Api()
+    patcher = _make_patcher(api)
+    observed = _read(api)
+    with pytest.raises(ConditionalPatchError) as raised:
+        patcher.patch(observed, [])
+    assert raised.value.kind is ConditionalPatchErrorCode.FAILURE
+    with pytest.raises(ConditionalPatchError) as raised:
+        patcher.patch(observed, _preconditions(observed)[:1])
+    assert raised.value.kind is ConditionalPatchErrorCode.FAILURE
+    assert api.patch is None

@@ -481,6 +481,7 @@ VERIFY_B     implemented
 ROTATE_A     runtime integration implemented (Slice 4G)
 SWITCH_TO_A  runtime integration implemented (Slice 4H)
 VERIFY_A     runtime integration implemented (Slice 4I)
+runtime config + dependency composition + auth bootstrap (Slice 5B)
 ```
 
 Slice 3D / 3E = bounded `ROTATE_A` implementation (staging + convergence).
@@ -494,11 +495,25 @@ in the terminal `STABLE_A` state. The complete runtime phase sequence
 (`PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A -> SWITCH_TO_A ->
 VERIFY_A`) is now implemented.
 
+Slice 5B = production runtime configuration, dependency composition,
+administrative authentication bootstrap, and read-only Keystone identity
+resolution. It makes the six-phase library constructible and usable in a
+production process from a validated `RuntimeConfig` (a single YAML file,
+statically validated, no live connections during construction). It adds the
+missing production `KubernetesApiConditionalBreederPatch` adapter required
+by `VERIFY_A`. It does not advance the transaction state machine, dispatch
+phases, or perform a complete end-to-end rotation.
+
 ### What remains outside the completed transaction runtime
 
-- Top-level CLI/orchestrator that composes all six runtime phases into an
-  end-to-end rotation command.
-- Kubernetes Job/CronJob packaging and RBAC manifests.
+- **Slice 5C — the top-level transaction runner**: state-driven phase
+  dispatch, lease ownership lifecycle, durable recovery across process
+  restarts, multi-phase execution, and full-transaction tests.
+- **Slice 5D — the mutating CLI**: an explicit execution command, runner
+  invocation, user-visible diagnostics, and process exit codes.
+- **Slice 5E — the Kubernetes Job**: Job manifest, ServiceAccount and RBAC,
+  runtime mounts and configuration injection, execution in the existing
+  `ops-tools` image.
 - Production/integration testing against live clusters.
 - Operational rollout work (runbooks, alerting, monitoring).
 - The CLI remains a read-only topology inspector; it does not invoke the

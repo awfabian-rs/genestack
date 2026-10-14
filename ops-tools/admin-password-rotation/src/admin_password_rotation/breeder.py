@@ -65,6 +65,29 @@ class BreederErrorCode(Enum):
     FAILURE = "breeder_mutation_failed"
 
 
+class ConditionalPatchErrorCode(Enum):
+    """Outcome categories for a UID/resourceVersion-conditional JSON Patch.
+
+    These are the transport-failure categories the breeder provenance-cleanup
+    patch adapter (``KubernetesApiConditionalBreederPatch``) reports.  They are
+    owned here rather than in ``verify_a`` so the production adapter in this
+    module can reference them without importing the phase module (the phase
+    module imports from this one for the provenance constants).
+    """
+
+    CONDITIONAL_REJECTED = "conditional_rejected"
+    OUTCOME_AMBIGUOUS = "outcome_ambiguous"
+    FAILURE = "failure"
+
+
+class ConditionalPatchError(Exception):
+    """Value-free transport failure between a patch adapter and its caller."""
+
+    def __init__(self, kind: ConditionalPatchErrorCode) -> None:
+        self.kind = kind
+        super().__init__(kind.value)
+
+
 _ERROR_MESSAGES = {
     kind: "The canonical breeder operation cannot be completed safely; details withheld."
     for kind in BreederErrorCode
@@ -278,3 +301,106 @@ class FakeBreederSecretClient:
             )
         if apply is not None:
             raise BreederError(BreederErrorCode.OUTCOME_AMBIGUOUS)
+
+
+class KubernetesApiConditionalBreederPatch:
+    """Production ``ConditionalBreederPatch`` adapter for the canonical breeder.
+
+    ``BreederSecretClient.conditional_stage`` (``KubernetesApiBreederSecretClient``)
+    stages a password plus provenance; the ``VERIFY_A`` breeder provenance
+    cleanup needs the same UID/resourceVersion-conditional JSON Patch
+    discipline with annotation ``remove`` operations only and no ``data``
+    change.  This adapter performs exactly one conditional JSON Patch against
+    the observed ``SecretSnapshot``:
+
+    - the patch body is the caller-supplied operation list; the first two
+      operations must be the atomic ``test`` preconditions on
+      ``/metadata/uid`` and ``/metadata/resourceVersion`` matching
+      ``expected``, and every follow-on operation must be an annotation
+      ``remove`` confined to the three canonical breeder provenance keys
+      (``PROVENANCE_TRANSACTION`` / ``PROVENANCE_GENERATION`` /
+      ``PROVENANCE_STAGE``); a patch that touches a credential-bearing
+      ``data`` field, adds or replaces any field or annotation, or removes
+      any other annotation is rejected as ``FAILURE`` before dispatch;
+    - a 409/412/422 rejection is atomic proof the patch did not apply
+      (``CONDITIONAL_REJECTED``);
+    - a missing status, 429, or 5xx outcome is ambiguous and requires
+      reobservation (``OUTCOME_AMBIGUOUS``);
+    - any other definite transport or server failure is ``FAILURE``.
+
+    The adapter performs no read-back verification and no further mutation;
+    read-after-write verification is the caller's (``VERIFY_A``)
+    responsibility.  It is constructed without contacting the API server.
+    """
+
+    def __init__(
+        self, api: _CoreV1SecretApi, *, timeout: float = 60.0,
+    ) -> None:
+        if not math.isfinite(timeout) or not 0 < timeout <= 3600:
+            raise ValueError("Timeout must be finite, positive, and at most 3600 seconds.")
+        self._api = api
+        self._timeout = timeout
+
+    @classmethod
+    def from_config(
+        cls, *, context: str | None = None, kubeconfig: Path | None = None,
+        timeout: float = 60.0,
+    ) -> Self:
+        validate_api_options(context=context, timeout=timeout)
+        try:
+            handle = create_kubernetes_api(
+                "CoreV1Api", context=context, kubeconfig=kubeconfig,
+            )
+        except Exception:
+            raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE) from None
+        return cls(cast(_CoreV1SecretApi, handle.api), timeout=timeout)
+
+    def patch(self, expected: SecretSnapshot, patch: list[dict[str, object]]) -> None:
+        # The first two operations are the atomic UID/resourceVersion test
+        # preconditions, and every follow-on operation must be an annotation
+        # ``remove`` confined to the three canonical breeder provenance keys.
+        # Credential-bearing ``data`` fields and any other object or
+        # annotation are off-limits: a cleanup patch that could rewrite a
+        # credential or an unrelated annotation is not a provenance cleanup.
+        # The preconditions are part of the same atomic JSON Patch, so a
+        # changed or missing target cannot silently satisfy the patch.
+        if len(patch) < 2:
+            raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE)
+        first = patch[0]
+        second = patch[1]
+        if (
+            first.get("op") != "test"
+            or first.get("path") != "/metadata/uid"
+            or first.get("value") != expected.uid
+            or second.get("op") != "test"
+            or second.get("path") != "/metadata/resourceVersion"
+            or second.get("value") != expected.resource_version
+        ):
+            # The protocol requires atomic UID/resourceVersion test preconditions.
+            raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE)
+        for op in patch[2:]:
+            if op.get("op") != "remove":
+                raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE)
+            path = op.get("path")
+            if not isinstance(path, str):
+                raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE)
+            key = path.removeprefix("/metadata/annotations/")
+            if path != f"/metadata/annotations/{key}" or key not in (
+                PROVENANCE_TRANSACTION, PROVENANCE_GENERATION, PROVENANCE_STAGE,
+            ):
+                raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE)
+            if "value" in op:
+                raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE)
+        try:
+            self._api.patch_namespaced_secret(
+                expected.name, expected.namespace, patch,
+                _content_type="application/json-patch+json",
+                _request_timeout=self._timeout,
+            )
+        except Exception as exc:
+            status = _http_status(exc)
+            if status in (409, 412, 422):
+                raise ConditionalPatchError(ConditionalPatchErrorCode.CONDITIONAL_REJECTED) from None
+            if status is None or status == 429 or status >= 500:
+                raise ConditionalPatchError(ConditionalPatchErrorCode.OUTCOME_AMBIGUOUS) from None
+            raise ConditionalPatchError(ConditionalPatchErrorCode.FAILURE) from None

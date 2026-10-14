@@ -1279,37 +1279,141 @@ Use historical files as provenance, not as an instruction to undo completed slic
 ## Current boundary
 
 ```text
-Slice 4H:
-    SWITCH_TO_A runtime integration complete
+Slice 5B:
+    production runtime configuration, dependency composition,
+    administrative authentication bootstrap, and read-only
+    identity resolution complete (including correction pass)
 
 Next:
-    VERIFY_A (observational final verification + transaction finalization)
+    Slice 5C -- top-level transaction runner
 ```
 
-Slice 4H is implemented and advances a `SWITCH_TO_A`-completed transaction
-through the reverse cutover (the participating `identity: active` locations
-propagated from the breakglass/B credential back to the newly rotated admin/
-new-A credential, with the resulting restart debt executed) to `VERIFY_A`,
-only after the authoritative A boundary is freshly reconciled at A3 (Slice 3C
-machinery) and the phase-qualified `rotate-a-complete` evidence is validated.
-The system has returned its participating consumers to A, but the overall
-rotation transaction is **not** yet complete. The next slice is the final
-`VERIFY_A` / transaction finalization: independently verify the whole system is
-safely back on A, declare `STABLE_A`, restore the admin lockout policy, clean
-the breeder transaction provenance, and complete the transaction. `VERIFY_A`,
-lockout restoration, final transaction completion, and packaging remain later
-work. The complete A -> B -> A rotation is not yet implemented.
+Slice 5B is implemented and makes the existing six-phase rotation library
+constructible and usable in a production process. It adds:
+
+- a statically validated `RuntimeConfig` (`runtime_config.py`) loaded from a
+  single YAML file, with fully offline validation;
+- the production dependency composition (`composition.py`), which assembles
+  every phase-consumed client and store from a validated configuration
+  without contacting any external system;
+- the missing production `ConditionalBreederPatch` adapter
+  (`KubernetesApiConditionalBreederPatch` in `breeder.py`) required by the
+  `VERIFY_A` breeder provenance cleanup;
+- the administrative authentication bootstrap (`auth_bootstrap.py`), which
+  establishes a Keystone administrative session via A-first / B-fallback
+  authentication, respecting the A0-A3 credential-generation provenance and
+  the B1 transitional state, without mutating either identity or the
+  durable transaction; and
+- the read-only identity resolution (`resolve_identities`), which verifies
+  the live Keystone identities of A and B against the fixed identity
+  contract.
+
+### Slice 5B correction pass (2026-10-14)
+
+Three defects found in the initial Slice 5B implementation were corrected:
+
+1. **A1 bootstrap credential selection** — `_select_a_candidate` previously
+   returned the breeder value for all of A0/A1/A2/A3, with a comment
+   claiming Keystone accepts A-new in A1. That is false: in the A1 substate
+   the breeder holds the staged A-new credential, but Keystone `admin` still
+   authenticates the established old-A credential. The fix recovers the A
+   candidate from the current PasswordSafe A record (which equals old A in
+   A1) and never attempts the staged A-new against Keystone. A0/A2/A3
+   continue to use the breeder value.
+
+2. **Keystone identity-discovery cycle** — `bootstrap_admin_session`
+   previously required `keystone_identities` (the live Keystone UUIDs) as a
+   mandatory argument, but a fresh process has no cached UUIDs and no
+   durable transaction to source them from. The parameter is now optional
+   (`ResolvedKeystoneIdentities | None`). A fresh process with no durable
+   transaction and no supplied identities fails closed with
+   `A_CANDIDATE_UNAVAILABLE` rather than performing a speculative
+   authentication. A durable transaction's recorded identities are the
+   trusted source on the resume path when the caller does not supply them
+   explicitly.
+
+3. **Conditional breeder patch validation** — `KubernetesApiConditionalBreederPatch.patch`
+   previously validated only the two `test` preconditions and passed the
+   remaining operations straight to the API. The fix enforces that every
+   follow-on operation is an annotation `remove` confined to the three
+   canonical breeder provenance keys. A patch that touches a credential-
+   bearing `data` field, adds or replaces any field or annotation, removes
+   any other annotation, or carries a `value` on a `remove` is rejected as
+   `FAILURE` before dispatch.
+
+4. **Keystone identity consistency on resume** — when a durable transaction
+   exists and the caller supplies explicit `keystone_identities`, the
+   bootstrap now verifies that the supplied identities match the
+   transaction's recorded identities exactly (all six fields). A mismatch
+   fails closed with `IDENTITY_CONSISTENCY_MISMATCH` before any Keystone
+   authentication is attempted. The transaction's recorded identities are
+   authoritative during resumption; explicitly supplied identities must not
+   silently override them.
+
+The complete runtime phase sequence
+(`PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A -> SWITCH_TO_A -> VERIFY_A`)
+is fully implemented as library workflows, and Slice 5B makes those
+workflows constructible from a validated runtime configuration. The
+application **cannot yet perform a complete executable rotation**: Slice 5C
+(the top-level transaction runner), Slice 5D (the mutating CLI), and Slice
+5E (the Kubernetes Job) remain unimplemented.
+
+The deployment has returned its participating consumers to A and the
+transaction is now durably complete in the terminal `STABLE_A` state. Slice 4E
+advances the transaction from a completed `PREPARE_B` to `VERIFY_B`; Slice 4F
+advances a verified transaction to `ROTATE_A`; Slice 4G advances a converged
+transaction to `SWITCH_TO_A`; Slice 4H advances a `SWITCH_TO_A` transaction to
+`VERIFY_A`; Slice 4I independently verifies the final stable-A state, performs
+transaction-scoped cleanup (lockout restoration, breeder provenance cleanup),
+and durably marks the transaction complete. Slice 4G performs the bounded
+`ROTATE_A` path (breeder -> Keystone -> PasswordSafe) with the B safety bridge
+freshly verified by Slice 4F before any admin credential change. Slice 3D
+changes only the admin lockout option and canonical breeder Secret, then stops
+at observed A1. Slice 3E converges the core A credential to observed A3.
+Slice 4A can mutate one already classified propagated location. Slice 4B can
+durably describe and freshly reconcile a complete propagation obligation.
+Slice 4C can safely execute that wave with grouped per-Secret writes and
+changed-location accounting, but it does not execute restarts or advance
+runtime phases. Slice 4D can execute and recover the workload restart debt
+caused by those changes, observing each rollout to completion, but it does not
+compose that into a runtime phase. Slice 4E composes 4B/4C/4D into
+`SWITCH_TO_B` and advances to `VERIFY_B`. Slice 4F verifies the B safety bridge
+and advances to `ROTATE_A`. Slice 4G composes the bounded Slice 3D/3E
+`ROTATE_A` libraries into the `ROTATE_A` runtime phase and advances to
+`SWITCH_TO_A`. Slice 4H composes the Slice 4B/4C/4D propagation and restart
+machinery (admin target) into the `SWITCH_TO_A` runtime phase and advances to
+`VERIFY_A`. Slice 4I independently verifies the final stable-A state, performs
+the transaction-scoped finalization cleanups (lockout restoration, breeder
+provenance cleanup), and durably marks the transaction complete in the terminal
+`STABLE_A` state. Slice 5B adds the runtime configuration, dependency
+composition, and authentication bootstrap that make the six-phase library
+constructible in a production process, without advancing the transaction or
+performing a complete end-to-end rotation.
 
 ## Suggested next-agent task
 
-Build the `VERIFY_A` observational final verification and transaction
-finalization — the phase that, behind the now-implemented `SWITCH_TO_A`
-gate, independently verifies from fresh external state that the whole system is
-safely back on A (the authoritative A boundary, every participating `identity:
-active` location on admin/new-A, workload health, lockout state), then declares
-`STABLE_A`, restores the admin lockout policy, cleans the breeder transaction
-provenance, and completes the transaction. It must be observational about the
-final state (fresh re-observation, not trust of durable progress flags); it may
-perform the lockout restoration and breeder provenance cleanup that the earlier
-phases deliberately deferred. It must not mutate the admin credential again or
-re-propagate.
+Implement **Slice 5C -- the top-level transaction runner**, which composes the
+now-constructible dependency set and the six implemented phase runners into a
+state-driven, re-entrant rotation workflow:
+
+- Lease ownership lifecycle: acquire, renew, and release the ownership Lease
+  around the transaction, asserting cooperative ownership before every
+  consequential mutation.
+- State-driven phase dispatch: read the durable transaction, determine the
+  current phase, and invoke the matching phase runner
+  (`run_prepare_b`, `run_switch_to_b`, `run_verify_b`, `run_rotate_a`,
+  `run_switch_to_a`, `run_verify_a`) with the composed dependencies.
+- Durable recovery across process restarts: a failed or interrupted
+  invocation resumes from fresh external observation, never replaying
+  completed mutations.
+- Multi-phase execution: advance the transaction through all six phases in
+  order until `VERIFY_A` completes the transaction in the terminal
+  `STABLE_A` state, respecting each phase's existing safety preconditions,
+  mutation discipline, and fail-closed semantics.
+- Full-transaction tests: end-to-end rotation scenarios against behavioral
+  fakes, including interruption and recovery at every phase boundary.
+
+Slice 5C must not redesign the phase contract, introduce a second
+transaction-state model, or change the established credential mutation
+ordering. The mutating CLI (Slice 5D) and Kubernetes Job packaging (Slice
+5E) remain separate later work.

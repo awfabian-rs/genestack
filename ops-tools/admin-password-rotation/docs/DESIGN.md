@@ -1,6 +1,6 @@
 # Design
 
-Status: Slices 1-3 (through Slice 3E) and Slices 4A-4I are complete.
+Status: Slices 1-3 (through Slice 3E), Slices 4A-4I, and Slice 5B are complete.
 
 - PREPARE_B is implemented as a library workflow and may invoke its narrowly
   scoped B credential mutations.
@@ -62,9 +62,17 @@ Status: Slices 1-3 (through Slice 3E) and Slices 4A-4I are complete.
   no propagation, no password generation, no Keystone reset, no workload
   restart. It does not perform packaging, CLI orchestration, or production
   integration.
+- Slice 5B implements the production runtime configuration, dependency
+  composition, administrative authentication bootstrap, and read-only
+  Keystone identity resolution that make the existing phase library
+  constructible and usable in a production process. It does not advance the
+  transaction state machine, dispatch phases, or perform a complete
+  end-to-end rotation; Slice 5C owns the top-level transaction runner.
 - No complete end-to-end rotation CLI command is implemented; the runtime
   phase sequence (`PREPARE_B -> SWITCH_TO_B -> VERIFY_B -> ROTATE_A ->
-  SWITCH_TO_A -> VERIFY_A`) is now fully implemented as library workflows.
+  SWITCH_TO_A -> VERIFY_A`) is fully implemented as library workflows, and
+  Slice 5B makes those workflows constructible from a validated runtime
+  configuration.
 
 ## Boundaries
 
@@ -1393,6 +1401,164 @@ suppressed, restoration remains required), no breeder provenance cleanup (the
 transaction provenance remains on the canonical breeder), no transaction
 completion, and no Kubernetes Job/CronJob packaging or RBAC. It stops at the
 `VERIFY_A` boundary with the participating consumers returned to A.
+
+## Implemented Slice 5B — runtime configuration, composition, and authentication bootstrap
+
+Slice 5B assembles the existing phase library into a production process
+without implementing the top-level transaction runner. It adds three
+boundaries:
+
+- `runtime_config.py` — a statically validated `RuntimeConfig` loaded from a
+  single YAML file. Validation is fully offline: loading and building a
+  configuration never contacts Kubernetes, Keystone, or PasswordSafe. The
+  file identifies the target namespace, the credential-location contract
+  (loaded with the existing strict contract parser and namespace-matched),
+  the transaction state Secret, the ownership Lease, the Kubernetes API
+  connection, the Keystone endpoints and identity names, the PasswordSafe /
+  Rackspace Identity endpoints and record IDs, Lease timing, and the
+  bootstrap candidate timeout. The PasswordSafe identity credential (the AD
+  service-account username plus a password read from a projected file) is the
+  only sensitive value; it is carried as `SecretValue` and excluded from
+  `repr()`, error messages, and the configuration digest. The digest is a
+  stable `sha256:<64 hex>` identifier over every non-credential setting, for
+  the runner to record in `PrepareBRequest.configuration_digest`.
+- `composition.py` — `build_dependencies`, which assembles the frozen
+  `Dependencies` set from a validated configuration: Keystone, Rackspace
+  Identity, PasswordSafe, state store, Lease store and manager, breeder
+  client, propagated-Secret client, workload client, and the conditional
+  breeder patch adapter. Construction is strictly offline: the Kubernetes
+  Python API facades are built by local credential resolution only
+  (in-cluster config or the selected kubeconfig); nothing authenticates,
+  acquires a Lease, reads or mutates a Secret, restarts a workload, or
+  advances a transaction.
+- `auth_bootstrap.py` — the administrative session bootstrap and read-only
+  identity resolution described below.
+
+### Production breeder patch adapter
+
+The entry-point audit found that `VERIFY_A`'s `ConditionalBreederPatch`
+boundary had no production implementation. `breeder.py` now provides
+`KubernetesApiConditionalBreederPatch`, the production adapter for that
+boundary. It performs exactly one UID/resourceVersion-conditional JSON
+Patch against the observed breeder `SecretSnapshot`. The patch body is
+validated before dispatch: the first two operations must be the atomic
+`test` preconditions on `/metadata/uid` and `/metadata/resourceVersion`
+(matching the snapshot), and every follow-on operation must be an annotation
+`remove` confined to the three canonical breeder provenance keys
+(`PROVENANCE_TRANSACTION` / `PROVENANCE_GENERATION` / `PROVENANCE_STAGE`).
+A patch that touches a credential-bearing `data` field, adds or replaces
+any field or annotation, removes any other annotation, or carries a
+`value` on a `remove` is rejected as `FAILURE` before dispatch — a cleanup
+patch that could rewrite a credential or an unrelated annotation is not a
+provenance cleanup. A 409/412/422 rejection is atomic proof the patch did
+not apply (`CONDITIONAL_REJECTED`); a missing status, 429, or 5xx is
+ambiguous and requires reobservation (`OUTCOME_AMBIGUOUS`); any other
+definite failure is `FAILURE`. The adapter performs no read-back
+verification and no further mutation; read-after-write verification is
+`VERIFY_A`'s responsibility. The `ConditionalPatchError` /
+`ConditionalPatchErrorCode` types moved from `verify_a.py` into `breeder.py`
+so the production adapter can own them without importing the phase module;
+`verify_a.py` re-imports them.
+
+### Administrative authentication bootstrap
+
+`bootstrap_admin_session` establishes a usable Keystone administrative
+session using only the established A (`admin`) and B (`breakglass`)
+identities. It performs at most **one** A authentication attempt and at most
+**one** B authentication attempt, in that order.
+
+Credential selection is informed by the durable transaction and the recorded
+credential-generation provenance, not by an indiscriminate scan of
+Kubernetes Secrets:
+
+- With no durable transaction (first execution), the canonical breeder
+  credential is the only legitimate initial A candidate.
+- With a durable transaction before `ROTATE_A` (`STABLE_A`, `PREPARE_B`,
+  `SWITCH_TO_B`, `VERIFY_B`), the breeder is the A candidate; the phase
+  runners prove the stable-A invariant.
+- With a durable transaction in `ROTATE_A` / `SWITCH_TO_A` / `VERIFY_A`, the
+  breeder's relationship to the authenticating credential is phase-dependent
+  (the A0-A3 substates), so the candidate is derived by the Slice 3C
+  reconciliation machinery (`observe_a_rotation_state` over the fresh breeder
+  snapshot, fresh PasswordSafe A read, and bounded Keystone authentication)
+  and the substate's authenticable credential is selected:
+  - `A0`: the canonical breeder (the established old-A credential).
+  - `A1`: the established old-A credential, recovered from the current
+    PasswordSafe A record. The breeder holds the staged A-new credential, but
+    Keystone `admin` still authenticates the old credential in A1, so the
+    breeder value must not be attempted against Keystone. The Slice 3C
+    observation has already proved A-new is rejected and old A succeeds.
+  - `A2` / `A3`: the breeder value (A-new), which the observation just
+    proved authenticable in those substates.
+
+The bootstrap requires the live Keystone UUIDs (user, domain, project, role)
+to construct a password-authentication request and to validate a successful
+scope. These are supplied as `keystone_identities` (`ResolvedKeystoneIdentities`
+or `None`):
+
+- A fresh process with no durable transaction has no cached UUIDs and no
+  transaction provenance. If `keystone_identities` is `None` and no durable
+  transaction exists, there is no legitimate A candidate and no speculative
+  authentication is performed: bootstrap fails closed with
+  `A_CANDIDATE_UNAVAILABLE`. The caller (the Slice 5C runner) must establish
+  the identities explicitly for first execution.
+- A durable transaction carries the `ResolvedKeystoneIdentities` it was
+  created with (the live Keystone UUIDs resolved when the transaction began).
+  These are the trusted references on the resume path. When
+  `keystone_identities` is `None` and a durable transaction is present, the
+  transaction's recorded identities are used.
+- When the caller supplies `keystone_identities` explicitly while a durable
+  transaction is present, the supplied identities must match the
+  transaction's recorded identities exactly (all six fields: admin user,
+  breakglass user, user domain, project, project domain, role). A mismatch
+  fails closed with `IDENTITY_CONSISTENCY_MISMATCH` before any Keystone
+  authentication is attempted: the transaction's recorded identities are
+  authoritative during resumption, and explicitly supplied identities must
+  not silently override them. When no durable transaction exists, the
+  supplied identities are used as-is (first execution).
+
+A definite A rejection (`KeystoneAuthRejected`) falls through to the B
+attempt, which uses the B credential recovered from PasswordSafe. An
+indeterminate A outcome (transport failure, timeout, server error, auth-
+receipt policy, malformed response) is never treated as a rejection: it
+fails with an infrastructure error and no speculative B selection is
+performed. A candidate-establishment failure (breeder unavailable,
+PasswordSafe A record unavailable in A1, malformed or contradictory
+transaction provenance, reconciliation failure) also fails closed without
+speculative B fallback.
+
+The B1 transitional state (`PREPARE_B` after PasswordSafe B staging, where
+PasswordSafe B may differ from Keystone B) is an observed state, not a
+lockout diagnosis; a B rejection is reported as such, and `PREPARE_B`'s own
+recovery semantics remain authoritative. While A is still functional
+(before any A credential mutation), bootstrap succeeds on A and never
+attempts B.
+
+The bootstrap never mutates either identity, any Kubernetes object, or the
+durable transaction; never alters or queries lockout settings; and never
+reinterprets authentication success as proof of authoritative-state
+consistency. The phase runners remain responsible for reconciliation and
+their lockout preconditions.
+
+### Read-only identity resolution
+
+`resolve_identities` resolves the live Keystone identities of A and B using
+an authenticated administrative session, against the fixed identity contract
+(`admin` / `default`, `breakglass` / `default`). It uses the existing user
+lookup, verifies the exact user IDs, names, domain, and enabled state the
+phase preconditions require, and reports missing, ambiguous, or disabled
+identities explicitly without raising. It creates nothing and mutates
+nothing.
+
+### What Slice 5B does not do
+
+- No top-level transaction runner, no state-driven phase dispatch, no
+  lease-ownership lifecycle, no multi-phase execution.
+- No new mutating CLI commands or exit codes (Slice 5D).
+- No Kubernetes Job/CronJob manifests, ServiceAccount, or RBAC (Slice 5E).
+- No new credential authority, no AD or third-account authentication, no
+  alternate B breeder Secret, no new state-machine phases, no transaction
+  schema change.
 
 ## Security and deployment limits
 

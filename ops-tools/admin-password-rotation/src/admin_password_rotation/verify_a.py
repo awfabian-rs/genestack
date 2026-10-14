@@ -110,6 +110,7 @@ from .a_state import (
     observe_a_rotation_state,
 )
 from .breeder import (
+    ConditionalPatchError, ConditionalPatchErrorCode,
     PROVENANCE_GENERATION, PROVENANCE_STAGE, PROVENANCE_STAGE_PENDING_KEYSTONE,
     PROVENANCE_TRANSACTION, BreederError, BreederReference, BreederSecretClient,
 )
@@ -1053,20 +1054,6 @@ def _observed_generation(
 # A small JSON-pointer escaper for annotation keys (mirrors breeder.py).
 def _pointer(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
-
-
-class ConditionalPatchErrorCode(Enum):
-    CONDITIONAL_REJECTED = "conditional_rejected"
-    OUTCOME_AMBIGUOUS = "outcome_ambiguous"
-    FAILURE = "failure"
-
-
-class ConditionalPatchError(Exception):
-    """Value-free transport failure between a patch adapter and this phase."""
-
-    def __init__(self, kind: ConditionalPatchErrorCode) -> None:
-        self.kind = kind
-        super().__init__(kind.value)
 
 
 @runtime_checkable
