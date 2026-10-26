@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ovn-snapshot-cron
+  labels:
+    app: ovn-backup
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: {{ .Values.job.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.job.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app: ovn-backup
+        spec:
+          serviceAccountName: {{ .Values.serviceAccountName | quote }}
+          restartPolicy: Never
+          nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 12 }}
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: {{ .Values.existingClaim | quote }}
+            - name: backup-script
+              configMap:
+                name: ovn-backup-script
+                defaultMode: 484
+          containers:
+            - name: ovn-central-backup
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - /backup-script/ovn-backup.sh
+              envFrom:
+                - configMapRef:
+                    name: ovn-backup-config
+{{- if .Values.swift.enabled }}
+                - secretRef:
+                    name: {{ .Values.swift.existingSecret | quote }}
+{{- end }}
+              volumeMounts:
+                - name: backup
+                  mountPath: {{ .Values.backup.directory | quote }}
+                - name: backup-script
+                  mountPath: /backup-script

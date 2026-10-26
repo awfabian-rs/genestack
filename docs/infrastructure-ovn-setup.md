@@ -264,26 +264,113 @@ kubectl label node node1 ovn.openstack.org/configured-
 
 The setup will remove any existing single interface ports and create the bond configuration.
 
-!!! tip "Setup your OVN backup"
+## Back up the OVN databases
 
-    To upload backups to Swift with tempauth, edit
-    /etc/genestack/kustomize/ovn-backup/base/ovn-backup.config to set
-    `SWIFT_TEMPAUTH_UPLOAD' "true"`, edit the other related options
-    appropriately (i.e., set the CONTAINER) and fill the ST_AUTH, ST_USER, and
-    ST_KEY as appropriate for the Swift CLI client in the `swift-tempauth.env`
-    file and then run:
+The local `ovn-backup` Helm chart installs a CronJob and ConfigMaps containing
+its configuration and backup script. The job runs daily by default, saves
+compressed northbound and southbound database backups to an existing PVC, and
+can optionally upload backups to Swift and metrics to a Prometheus
+Pushgateway.
 
-    ``` shell
-    kubectl apply -k /etc/genestack/kustomize/ovn-backup/base \
-    --prune -l app=ovn-backup \
-    --prune-allowlist=core/v1/Secret \
-    --prune-allowlist=core/v1/ConfigMap
-    ```
+The chart does not create the PVC, ServiceAccount, Swift Secret, Pushgateway,
+or Kube-OVN resources. Before installing it, the `ovn` ServiceAccount and
+Kube-OVN tooling must already exist in `kube-system`, and nodes selected by
+`kube-ovn/role: master` must be able to mount the backup volume.
 
-    If you need to change variables in the future, you can edit the relevant
-    files and use `kubectl` with these prune options to avoid accumulating
-    old ConfigMaps and Secrets from successive `kubectl apply` operations, but
-    you can omit the pruning options if desired.
+Create the PVC manually. These settings preserve the previous backup defaults;
+change the storage class or size for the environment before applying it:
+
+``` yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ovndb-backup
+  namespace: kube-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: general
+```
+
+``` shell
+kubectl apply -f ovndb-backup-pvc.yaml
+```
+
+The storage class must support volumes on Kube-OVN master nodes. With
+`ReadWriteOnce`, a volume may need to detach and reattach if successive jobs
+run on different master nodes; choose storage and scheduling appropriate for
+the cluster.
+
+Site overrides are read from
+`/etc/genestack/helm-configs/ovn-backup/*.yaml`. For example, create
+`/etc/genestack/helm-configs/ovn-backup/ovn-backup-helm-overrides.yaml`:
+
+``` yaml
+schedule: "0 2 * * *"
+existingClaim: ovndb-backup
+backup:
+  retentionDays: 14
+prometheus:
+  enabled: false
+  pushgatewayUrl: http://prometheus-pushgateway.prometheus.svc.cluster.local:9091
+  jobName: ovn-backup
+swift:
+  enabled: false
+  container: my-ovn-backups
+  existingSecret: ovn-backup-swift-tempauth-account
+```
+
+If Swift upload is enabled, create the referenced Secret in `kube-system`.
+The Secret must contain `ST_AUTH`, `ST_USER`, and `ST_KEY`; do not put these
+credentials in the Helm values file.
+
+``` shell
+kubectl --namespace kube-system create secret generic \
+  ovn-backup-swift-tempauth-account \
+  --from-literal=ST_AUTH='https://swift.example.com/auth/v1.0' \
+  --from-literal=ST_USER='account:user' \
+  --from-literal=ST_KEY='replace-me'
+```
+
+Swift upload uses the existing script's `kubectl exec` workflow against the
+`openstack-admin-client` pod in the `openstack` namespace. That pod and its
+Swift client must exist, and the `ovn` ServiceAccount must be authorized to
+exec into it. No Swift Secret is required while `swift.enabled` is `false`.
+
+Install or upgrade the release from the Genestack checkout:
+
+``` shell
+sudo /opt/genestack/bin/install-ovn-backup.sh
+```
+
+Additional Helm flags can be passed to the script, for example
+`--set schedule='0 4 * * *'`. Inspect the release and scheduled workload with:
+
+``` shell
+helm --namespace kube-system status ovn-backup
+helm --namespace kube-system get values ovn-backup
+kubectl --namespace kube-system get cronjob ovn-snapshot-cron
+```
+
+To test a backup without waiting for the schedule, create a one-off Job and
+inspect its logs and the PVC contents:
+
+``` shell
+JOB_NAME="ovn-backup-test-$(date +%s)"
+kubectl --namespace kube-system create job \
+  --from=cronjob/ovn-snapshot-cron "${JOB_NAME}"
+kubectl --namespace kube-system logs --follow "job/${JOB_NAME}"
+kubectl --namespace kube-system exec "job/${JOB_NAME}" -- find /backup -type f
+kubectl --namespace kube-system delete job "${JOB_NAME}"
+```
+
+Backups and the configured log file remain on the PVC. Helm removal does not
+remove that manually managed storage or the optional Secret. The chart assumes
+one fixed CronJob in `kube-system`; it does not provision dependencies or
+validate cross-namespace Swift access.
 
 ### Centralize `kube-ovn-controller` pods
 
