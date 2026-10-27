@@ -282,14 +282,14 @@ the claim's lifecycle:
 ``` yaml
 persistence:
   create: false
-  existingClaim: ovndb-backup
+  claimName: ovndb-backup
 ```
 
 To use a different existing claim:
 
 ``` yaml
 persistence:
-  existingClaim: my-ovn-backups
+  claimName: my-ovn-backups
 ```
 
 The chart does not create the ServiceAccount, Swift Secret, Pushgateway, or
@@ -297,13 +297,13 @@ Kube-OVN resources. Before installing it, the `ovn` ServiceAccount and
 Kube-OVN tooling must already exist in `kube-system`, and nodes selected by
 `kube-ovn/role: master` must be able to mount the backup volume.
 
-The chart can instead create the PVC using the same `existingClaim` value as
+The chart can instead create the PVC using the same `claimName` value as
 its name. For example:
 
 ``` yaml
 persistence:
   create: true
-  existingClaim: ovndb-backup
+  claimName: ovndb-backup
   storageClass: general
   size: 10Gi
   accessMode: ReadWriteOnce
@@ -342,7 +342,7 @@ Then leave `persistence.create: false` and reference it:
 ``` yaml
 persistence:
   create: false
-  existingClaim: ovndb-backup
+  claimName: ovndb-backup
 ```
 
 This keeps the PVC lifecycle entirely outside Helm. Helm's keep annotation
@@ -363,7 +363,7 @@ Site overrides are read from
 ``` yaml
 schedule: "0 2 * * *"
 persistence:
-  existingClaim: ovndb-backup
+  claimName: ovndb-backup
 backup:
   retentionDays: 14
 prometheus:

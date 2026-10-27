@@ -11,7 +11,7 @@ nodeSelector:
 
 persistence:
   create: false
-  existingClaim: ovndb-backup
+  claimName: ovndb-backup
   storageClass: general
   size: 1Gi
   accessMode: ReadWriteOnce

@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Values.persistence.existingClaim | quote }}
+  name: {{ .Values.persistence.claimName | quote }}
   namespace: {{ .Release.Namespace | quote }}
   annotations:
     helm.sh/resource-policy: keep
