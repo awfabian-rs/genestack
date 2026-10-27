@@ -272,13 +272,51 @@ compressed northbound and southbound database backups to an existing PVC, and
 can optionally upload backups to Swift and metrics to a Prometheus
 Pushgateway.
 
-The chart does not create the PVC, ServiceAccount, Swift Secret, Pushgateway,
-or Kube-OVN resources. Before installing it, the `ovn` ServiceAccount and
+By default, the chart does not create or manage the PVC. It references
+`ovndb-backup`, including a PVC left by the previous Kustomize-based
+installation, without adopting it. The claim must exist in the chart's
+namespace (`kube-system` for the standard installation). The default is
+equivalent to the following; Helm install, upgrade, and uninstall do not alter
+the claim's lifecycle:
+
+``` yaml
+persistence:
+  create: false
+  existingClaim: ovndb-backup
+```
+
+To use a different existing claim:
+
+``` yaml
+persistence:
+  existingClaim: my-ovn-backups
+```
+
+The chart does not create the ServiceAccount, Swift Secret, Pushgateway, or
+Kube-OVN resources. Before installing it, the `ovn` ServiceAccount and
 Kube-OVN tooling must already exist in `kube-system`, and nodes selected by
 `kube-ovn/role: master` must be able to mount the backup volume.
 
-Create the PVC manually. These settings preserve the previous backup defaults;
-change the storage class or size for the environment before applying it:
+The chart can instead create the PVC using the same `existingClaim` value as
+its name. For example:
+
+``` yaml
+persistence:
+  create: true
+  existingClaim: ovndb-backup
+  storageClass: general
+  size: 10Gi
+  accessMode: ReadWriteOnce
+```
+
+Chart-created PVCs have the `helm.sh/resource-policy: keep` annotation and
+survive Helm uninstall. A retained PVC is then outside the normal release
+lifecycle and a later installation does not automatically adopt it. Reference
+the retained claim with `persistence.create: false`, or explicitly handle its
+Helm ownership before trying to create it through another release.
+
+To manage storage entirely outside Helm, apply a PVC independently. These
+settings use the Genestack defaults inherited from the previous installation:
 
 ``` yaml
 apiVersion: v1
@@ -299,6 +337,20 @@ spec:
 kubectl apply -f ovndb-backup-pvc.yaml
 ```
 
+Then leave `persistence.create: false` and reference it:
+
+``` yaml
+persistence:
+  create: false
+  existingClaim: ovndb-backup
+```
+
+This keeps the PVC lifecycle entirely outside Helm. Helm's keep annotation
+only prevents Helm from deleting a chart-created PVC. It does not prevent
+independent deletion of the PVC or its storage. PersistentVolume reclaim
+policy (`Delete` or `Retain`) is configured on the PV or StorageClass, not on
+the PVC; this chart does not manage StorageClasses, PVs, or reclaim policy.
+
 The storage class must support volumes on Kube-OVN master nodes. With
 `ReadWriteOnce`, a volume may need to detach and reattach if successive jobs
 run on different master nodes; choose storage and scheduling appropriate for
@@ -310,7 +362,8 @@ Site overrides are read from
 
 ``` yaml
 schedule: "0 2 * * *"
-existingClaim: ovndb-backup
+persistence:
+  existingClaim: ovndb-backup
 backup:
   retentionDays: 14
 prometheus:
@@ -368,9 +421,10 @@ kubectl --namespace kube-system delete job "${JOB_NAME}"
 ```
 
 Backups and the configured log file remain on the PVC. Helm removal does not
-remove that manually managed storage or the optional Secret. The chart assumes
-one fixed CronJob in `kube-system`; it does not provision dependencies or
-validate cross-namespace Swift access.
+remove externally managed storage, a chart-created PVC retained by the keep
+policy, or the optional Secret. The chart assumes one fixed CronJob in
+`kube-system`; it does not provision other dependencies or validate
+cross-namespace Swift access.
 
 ### Centralize `kube-ovn-controller` pods
 

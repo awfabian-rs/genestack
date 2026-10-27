@@ -2,8 +2,9 @@
 
 _Genestack_ includes an optional `ovn-backup` Helm chart. When installed with
 its default values, it runs _OVN_ snapshots daily in the `kube-system`
-namespace, stores them on the manually created `ovndb-backup`
-_PersistentVolumeClaim_, and deletes snapshots older than 30 days.
+namespace, stores them on the externally managed `ovndb-backup`
+_PersistentVolumeClaim_, and deletes snapshots older than 30 days. The chart
+can optionally create the claim instead.
 
 You should primarily follow the [Kube-OVN documentation on backup and recovery](https://kubeovn.github.io/docs/stable/en/ops/recover-db/) and consider the information here supplementary.
 
@@ -11,9 +12,10 @@ You should primarily follow the [Kube-OVN documentation on backup and recovery](
 
 The chart creates a _k8s_ _CronJob_ alongside the other central OVN components
 that stores snapshots of the OVN NB and SB databases on an existing
-_PersistentVolume_. The chart deliberately does not create the PVC or install
-itself. Follow [Deploy Open vSwitch OVN](infrastructure-ovn-setup.md#back-up-the-ovn-databases)
-for PVC creation, configuration, and installation instructions.
+_PersistentVolume_. By default, the chart references an externally managed
+PVC; it can optionally create a retained PVC. Follow
+[Deploy Open vSwitch OVN](infrastructure-ovn-setup.md#back-up-the-ovn-databases)
+for storage, configuration, and installation instructions.
 
 ## Restoration and recovery
 

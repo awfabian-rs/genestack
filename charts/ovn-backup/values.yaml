@@ -9,7 +9,12 @@ serviceAccountName: ovn
 nodeSelector:
   kube-ovn/role: master
 
-existingClaim: ovndb-backup
+persistence:
+  create: false
+  existingClaim: ovndb-backup
+  storageClass: general
+  size: 1Gi
+  accessMode: ReadWriteOnce
 
 backup:
   retentionDays: 30

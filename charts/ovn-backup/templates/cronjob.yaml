@@ -23,7 +23,7 @@ spec:
           volumes:
             - name: backup
               persistentVolumeClaim:
-                claimName: {{ .Values.existingClaim | quote }}
+                claimName: {{ .Values.persistence.existingClaim | quote }}
             - name: backup-script
               configMap:
                 name: ovn-backup-script
