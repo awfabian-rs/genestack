@@ -240,11 +240,10 @@ upload_file() {
 cd "$BACKUP_DIR" || exit 2
 
 FAILED_UPLOAD=false
-find "$YMD" -type f -newer "$BACKUP_DIR/last_upload" | \
 while read -r file
 do
     upload_file "$file"
-done
+done < <(find "$YMD" -type f -newer "$BACKUP_DIR/last_upload")
 
 if [[ "$FAILED_UPLOAD" == "true" ]]
 then
