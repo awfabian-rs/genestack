@@ -24,7 +24,7 @@ backup:
 
 prometheus:
   enabled: false
-  pushgatewayUrl: http://prometheus-pushgateway.prometheus.svc.cluster.local:9091
+  pushgatewayUrl: http://prometheus-pushgateway.monitoring.svc.cluster.local:9091
   jobName: ovn-backup
 
 swift:
