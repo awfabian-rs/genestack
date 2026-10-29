@@ -17,6 +17,7 @@ spec:
             app: ovn-backup
         spec:
           serviceAccountName: {{ .Values.serviceAccountName | quote }}
+          automountServiceAccountToken: true
           restartPolicy: Never
           nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 12 }}
