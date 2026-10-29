@@ -38,8 +38,16 @@ spec:
                 - configMapRef:
                     name: ovn-backup-config
 {{- if .Values.swift.enabled }}
-                - secretRef:
-                    name: {{ .Values.swift.existingSecret | quote }}
+              env:
+                - name: ST_AUTH
+                  value: {{ .Values.swift.authUrl | quote }}
+                - name: ST_USER
+                  value: {{ .Values.swift.user | quote }}
+                - name: ST_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.swift.existingSecret | quote }}
+                      key: ST_KEY
 {{- end }}
               volumeMounts:
                 - name: backup

@@ -1349,6 +1349,8 @@ prometheus:
   enabled: false
 swift:
   enabled: false
+  authUrl: ""
+  user: ""
 EOF
     fi
 }

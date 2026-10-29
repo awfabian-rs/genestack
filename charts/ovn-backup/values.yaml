@@ -29,6 +29,8 @@ prometheus:
 
 swift:
   enabled: false
+  authUrl: ""
+  user: ""
   container: test-ovn-backup
   existingSecret: ovn-backup-swift-tempauth-account
 

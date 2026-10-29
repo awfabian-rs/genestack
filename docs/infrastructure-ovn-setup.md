@@ -372,21 +372,26 @@ prometheus:
   jobName: ovn-backup
 swift:
   enabled: false
+  authUrl: https://swift.example.com/auth/v1.0
+  user: account:user
   container: my-ovn-backups
   existingSecret: ovn-backup-swift-tempauth-account
 ```
 
-If Swift upload is enabled, create the referenced Secret in `kube-system`.
-The Secret must contain `ST_AUTH`, `ST_USER`, and `ST_KEY`; do not put these
-credentials in the Helm values file.
+Set `swift.authUrl` and `swift.user` in the Helm overrides to supply `ST_AUTH`
+and `ST_USER`. To enable uploads, set `swift.enabled: true` and create the
+referenced Secret in `kube-system`. The Secret only needs to contain `ST_KEY`:
 
 ``` shell
 kubectl --namespace kube-system create secret generic \
   ovn-backup-swift-tempauth-account \
-  --from-literal=ST_AUTH='https://swift.example.com/auth/v1.0' \
-  --from-literal=ST_USER='account:user' \
-  --from-literal=ST_KEY='replace-me'
+  --from-literal=ST_KEY='replace-with-actual-key'
 ```
+
+Previously created Secrets containing `ST_AUTH`, `ST_USER`, and `ST_KEY` can
+remain in place because the updated CronJob reads only `ST_KEY` from the
+Secret. The authentication URL and username must still be configured through
+`swift.authUrl` and `swift.user` in the Helm overrides.
 
 Swift upload uses the existing script's `kubectl exec` workflow against the
 `openstack-admin-client` pod in the `openstack` namespace. That pod and its
