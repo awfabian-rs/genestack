@@ -153,7 +153,9 @@ trap finalize_and_upload_metrics EXIT INT TERM HUP
 # Delete old backup files on volume.
 cd "$BACKUP_DIR" || exit 2
 [[ -e "$BACKUP_DIR/last_upload" ]] || touch "$BACKUP_DIR/last_upload" || exit 3
-find "$BACKUP_DIR" -ctime +"$RETENTION_DAYS" -delete;
+find "$BACKUP_DIR" -type f \
+    \( -name "*.backup" -o -name "*.backup.gz" \) \
+    -ctime +"$RETENTION_DAYS" -delete
 
 # Make a backup in YYYY/MM/DD directory in $BACKUP_DIR
 YMD="$(date +"%Y/%m/%d")"
