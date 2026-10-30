@@ -115,7 +115,8 @@ timestamp_metric run_timestamp
 
 finalize_and_upload_metrics() {
     local FILE_COUNT
-    FILE_COUNT=$(find "$BACKUP_DIR" -name \*.backup | wc -l)
+    FILE_COUNT=$(find "$BACKUP_DIR" -type f \
+        \( -name "*.backup" -o -name "*.backup.gz" \) | wc -l)
     update_metric disk_files_gauge "$FILE_COUNT"
     local DISK_PERCENT_USED
     DISK_PERCENT_USED=$(df "$BACKUP_DIR" | perl -lane 'next unless $. == 2; print int($F[4])')
